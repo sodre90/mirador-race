@@ -2,15 +2,16 @@
   "name": "race",
   "title": "Race",
   "icon": "icon.svg",
-  "version": "0.1.2",
-  "api": 12,
+  "version": "0.2.0",
+  "api": 13,
   "tellsCaller": true,
-  "description": "Race a task on several agents of one profile at once, such as four of a small local model, each in a git worktree of its own. They share a board where they post what they learn, read each other's work and borrow what helps, and run your check before they finish. They can rank each other's work; then the conversation that started the race merges the best, or combines the best parts.",
-  "tagline": "Several agents race one task, each in a worktree of its own, sharing a board; the best work gets merged.",
+  "description": "Race a task on several agents at once, such as four of a small local model, or one on each of several profiles to compare them, each in a git worktree of its own. They share a board where they post what they learn and borrow from each other's work. The race page gives each racer a lane: its time, changes, latest note and, for a race you started, the check Race ran in its folder. Then you take the best work, or combine the best parts, from the page, or the conversation that started the race picks.",
+  "tagline": "Several agents race one task, each in a worktree of its own; you take the best work, or combine it.",
   "screenshots": [
-    { "path": "screenshots/racers-beside-captain.png", "caption": "Four racers at work under the conversation that started the race, beside the race page" },
-    { "path": "screenshots/race-under-way.png", "caption": "What each racer changed so far, and the board where they share what they learn" },
-    { "path": "screenshots/racers-vote.png", "caption": "The racers say what they did, then rank each other's work" }
+    { "path": "screenshots/racers-beside-captain.png", "caption": "Four racers at work under the conversation that started the race, each in a lane on the race page" },
+    { "path": "screenshots/race-form.png", "caption": "/race:race opens a form: the task, a profile for each racer, the check, and whether they vote" },
+    { "path": "screenshots/race-under-way.png", "caption": "Each racer's lane: its profile, time, changes, latest note and check, with its changes inline" },
+    { "path": "screenshots/pick-the-work.png", "caption": "Once they're done, pick the work to take, with each racer's check and vote side by side" }
   ],
   "canvas": { "host": "host.ts", "view": "view.js" }
 }

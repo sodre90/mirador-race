@@ -26,13 +26,14 @@ test.afterAll(async () => {
 });
 
 const captainProfile = "main-model";
-const racerProfile = "qwen3-coder";
+const racerProfiles = ["qwen3-coder", "qwen3-coder", "kimi-k2", "glm-4.6"];
 const task = "Page 1 of the orders list skips the first 20 orders, and the last page is always empty. Fix paginate() in src/paginate.ts so pages count from 1, and add tests for the first, the last and an empty list.";
 /** The stand-in agent works until it is stopped, then ends its turn as finished; the pictures show the task without this. */
 const WORKS_UNTIL_STOPPED = "FINISHED ON STOP ";
 const KEEPS_BUSY = "STOPPED QUIET until the screenshots are taken";
-const request = `Race the pagination bug on four ${racerProfile} racers, with bun test as the check, and let them vote.`;
-const captainsAnswer = `Racing it on four ${racerProfile} racers, each in a worktree of its own, with bun test as the check. When they're done they vote, and I'll merge the work that wins.`;
+const request = "Page 1 of the orders list skips the first 20 orders, and the last page is always empty. Where's the bug?";
+const captainsAnswer =
+  "In paginate() in src/paginate.ts: pages count from 1, but the offset is page * size, so page 1 starts at order 21, and pages has a stray + 1. Race it with /race:race if you'd like a few takes on the fix to pick from.";
 
 const BUGGY_PAGINATE = `export interface Page<T> {
   items: T[];
@@ -54,6 +55,8 @@ test("a page holds at most size items", () => {
   expect(paginate(Array.from({ length: 50 }, (_, index) => index), 2).items).toHaveLength(20);
 });
 `;
+
+const OFFSET_ONLY_PAGINATE = BUGGY_PAGINATE.replace("page * size", "(page - 1) * size");
 
 const FIXED_PAGINATE = BUGGY_PAGINATE.replace("Math.ceil(items.length / size) + 1", "Math.max(1, Math.ceil(items.length / size))").replace("page * size", "(page - 1) * size");
 
@@ -120,13 +123,17 @@ function commitWork(folder: string, message: string) {
   git(folder, "-c", "user.name=Racer", "-c", "user.email=racer@example.test", "commit", "-qm", message);
 }
 
-/** Each racer's folder, by the branch the race tool named for it. */
-function racerFolders(started: string) {
-  const branches = [...started.matchAll(/racer (\d) on (\S+?)[,)]/g)].map(([, number, branch]) => [Number(number), branch!] as const);
+/** Each racer's folder, by the branch its lane on the race page shows. */
+async function racerFolders(view: FrameLocator) {
   const worktrees = git(host.projectDir, "worktree", "list", "--porcelain")
     .split("\n\n")
     .map((block) => ({ folder: block.match(/^worktree (.+)$/m)?.[1], branch: block.match(/^branch refs\/heads\/(.+)$/m)?.[1] }));
-  return new Map(branches.map(([number, branch]) => [number, worktrees.find((worktree) => worktree.branch === branch)!.folder!]));
+  const folders = new Map<number, string>();
+  for (const number of [1, 2, 3, 4]) {
+    const branch = await view.locator(`.lane[data-racer="${number}"] .line code`).textContent();
+    folders.set(number, worktrees.find((worktree) => worktree.branch === branch)!.folder!);
+  }
+  return folders;
 }
 
 async function startConversationWithoutModel(page: Page) {
@@ -181,7 +188,7 @@ async function takeScreenshot(page: Page, name: string, area: Locator, { from, d
 test("screenshots of a race", async ({ page }) => {
   await helpers().signIn(page, host);
   await helpers().addWorkspace(page, host.projectDir);
-  for (const name of [captainProfile, racerProfile]) {
+  for (const name of new Set([captainProfile, ...racerProfiles])) {
     const profiles = await helpers().createProfile(page, name, "", "", "opencode");
     await profiles.getByRole("button", { name: "Close" }).click();
   }
@@ -190,21 +197,39 @@ test("screenshots of a race", async ({ page }) => {
   await helpers().sendMessage(page, `SAY ${captainsAnswer}`);
   await expect(page.locator(".chat-header:visible .badge")).toHaveText("idle", { timeout: 60_000 });
 
-  const started = await helpers().callCanvasTool(host, captainId, "race", { task: `${WORKS_UNTIL_STOPPED}${task}`, profile: racerProfile, racers: 4, check: "bun test", decide: "vote" });
-  const raceId = started.match(/^Race (\w+) started/)![1]!;
+  const composer = page.locator(".composer:visible textarea");
+  await composer.fill("/race:race");
+  await composer.press("Enter");
+  await composer.press("Enter");
   const view = helpers().walkthroughView(page);
-  await expect(view.locator("tr[data-racer] .state-working")).toHaveCount(4, { timeout: 60_000 });
-  const folders = racerFolders(started);
+  await expect(view.getByRole("heading", { name: "New race" })).toBeVisible();
+  await helpers().untilFramePainted(page, page.locator(".canvas-panel:visible .canvas-body > .canvas-frame.plugin iframe"));
+  await view.getByLabel("Task").fill(task);
+  for (const [index, profile] of racerProfiles.entries()) await view.getByLabel(`Racer ${index + 1}'s profile`).selectOption(profile);
+  await view.getByLabel("Check").fill("bun test");
+  await view.getByRole("checkbox", { name: "The racers rank each other's work before I pick" }).check();
+  await page.mouse.move(0, 0);
+  await takeScreenshot(page, "race-form", page.locator(".canvas-panel:visible"), { downTo: view.getByRole("button", { name: "Start race" }) });
+
+  await view.getByLabel("Task").fill(`${WORKS_UNTIL_STOPPED}${task}`);
+  await view.getByRole("button", { name: "Start race" }).click();
+  const heading = view.getByRole("heading", { name: /^Race \w+$/ });
+  await expect(heading).toBeVisible();
+  const raceId = (await heading.textContent())!.replace("Race ", "");
+  await expect(view.locator(".lane .state-working")).toHaveCount(4, { timeout: 60_000 });
+  await page.locator(".plugin-command-reply:visible").getByRole("button", { name: "Dismiss" }).click();
+  const folders = await racerFolders(view);
   const racers = await racerConversations(page, captainId, raceId);
   const post = (racer: number, text: string) => helpers().callCanvasTool(host, racer === 0 ? captainId : racers.get(racer)!, "race_board", { post: text });
   const peek = (by: number, racer: number) => helpers().callCanvasTool(host, racers.get(by)!, "race_peek", { racer });
+  const lane = (number: number) => view.locator(`.lane[data-racer="${number}"]`);
 
   await post(1, "Plan: a failing test for page 1 first, then fix the offset in paginate().");
   await post(2, "Plan: check who calls paginate() before changing it; the orders API and the CSV export both do.");
   await post(3, "Found it: pages are 1-based but the offset is page * size, so page 1 starts at order 21. And pages has a stray + 1, hence the empty last page.");
   await post(0, "Keep paginate()'s signature as it is: the mobile app calls it too.");
   writeProject(folders.get(1)!, { "src/paginate.ts": FIXED_PAGINATE, "src/paginate.test.ts": EDGE_TESTS });
-  writeProject(folders.get(2)!, { "src/paginate.ts": FIXED_PAGINATE, "src/paginate.test.ts": FIRST_PAGE_TEST });
+  writeProject(folders.get(2)!, { "src/paginate.ts": OFFSET_ONLY_PAGINATE, "src/paginate.test.ts": EDGE_TESTS });
   writeProject(folders.get(3)!, { "src/paginate.ts": CLAMPED_PAGINATE, "src/paginate.test.ts": CLAMP_TESTS });
   writeProject(folders.get(4)!, { "src/paginate.test.ts": EDGE_TESTS });
   await peek(4, 3);
@@ -214,7 +239,7 @@ test("screenshots of a race", async ({ page }) => {
     if ((await racersToggle.getAttribute("aria-expanded")) === "false") await racersToggle.click();
   };
   await showRacersUnderComposer();
-  await expect(view.locator('tr[data-racer="4"]')).toContainText("1 file");
+  await expect(lane(4)).toContainText("1 file");
   await tidyForScreenshot(page, view);
   await takeScreenshot(page, "racers-beside-captain", page.locator("body"));
 
@@ -224,7 +249,7 @@ test("screenshots of a race", async ({ page }) => {
   const stopRacer = async (number: number) => {
     await showRacersUnderComposer();
     await page.locator(".delegated-group-items:visible li", { hasText: `racer ${number} ` }).getByRole("button", { name: "Stop", exact: true }).click();
-    await expect(view.locator(`tr[data-racer="${number}"] .state-finished`)).toBeVisible();
+    await expect(lane(number).locator(".state-finished")).toBeVisible({ timeout: 60_000 });
   };
   /** A busy racer's vote prompt waits behind its turn, so the stand-in can't end the vote turn before its vote is cast. */
   const keepBusy = async (number: number) => {
@@ -236,14 +261,19 @@ test("screenshots of a race", async ({ page }) => {
 
   await stopRacer(1);
   await keepBusy(1);
-  await expect(view.locator('tr[data-racer="1"]')).toContainText("2 files");
+  await expect(lane(1)).toContainText("2 files");
+  await expect(lane(1).locator(".check summary")).toHaveText(/^Check passed in [\d.]+ s$/);
+  await helpers().untilFramePainted(page, page.locator(".canvas-panel:visible .canvas-body > .canvas-frame.plugin iframe"));
+  await lane(3).getByRole("button", { name: "Changes" }).click();
+  await expect(lane(3).getByLabel("Changes")).toContainText("Math.min(Math.max(1, Math.trunc(page)), pages)");
   await tidyForScreenshot(page, view);
-  await takeScreenshot(page, "race-under-way", page.locator(".canvas-panel:visible"), { downTo: view.locator(".note", { hasText: "Keep paginate()'s signature" }) });
+  await takeScreenshot(page, "race-under-way", page.locator(".canvas-panel:visible"), { downTo: view.locator(".lanes") });
+  await lane(3).getByRole("button", { name: "Hide changes" }).click();
 
   commitWork(folders.get(3)!, "Count pages from 1 and show the last page for one past the end");
   await post(3, "Done: offset from 1, no empty last page, and a page past the end shows the last one, as the API's clients expect. bun test passes, 6 tests.");
   commitWork(folders.get(2)!, "Fix the first page's offset");
-  await post(2, "Done: page 1 starts at the first order. The CSV export passes page 0, so it needs a change too; I left it, as it's out of the task.");
+  await post(2, "Done: page 1 starts at the first order. The last page is still empty: the CSV export counts on the + 1 in pages, so I left it.");
   await post(4, "Done: racer 3's fix with my edge tests. bun test passes, 4 tests.");
   writeProject(folders.get(4)!, { "src/paginate.ts": FIXED_PAGINATE });
   commitWork(folders.get(4)!, "Fix paginate() and test its edges");
@@ -256,13 +286,12 @@ test("screenshots of a race", async ({ page }) => {
   const votes: [number, number[], string][] = [
     [1, [3, 4, 2], "Racer 3 also clamps a page past the end, which the API's clients send, and tests it. Racer 4's is the same as mine. Racer 2 leaves the empty last page."],
     [2, [3, 1, 4], "Racer 3 covers every edge with tests. Racer 1 is right but doesn't clamp; racer 4 copied racer 3's tests without the clamp."],
-    [3, [1, 4, 2], "Racer 1's fix is the smallest that passes the tests asked for. Racer 2 still shows an empty last page."],
+    [3, [1, 4, 2], "Racer 1's fix is the smallest that passes the tests asked for. Racer 2's check fails: its last page is still empty."],
     [4, [3, 1, 2], "Racer 3's clamp handles page 0 from the CSV export, which racer 2 found. Racer 1 is right otherwise."],
   ];
   for (const [racer, ranking, why] of votes) await helpers().callCanvasTool(host, racers.get(racer)!, "race_vote", { ranking, why });
-  await expect(view.getByRole("list", { name: "Standings" })).toBeVisible();
+  await expect(view.getByText("Over: pick the work to take", { exact: false })).toBeVisible();
+  await expect(view.getByRole("table", { name: "Results" }).locator('tr[data-racer="2"]')).toContainText("Failed (exit code 1)");
   await tidyForScreenshot(page, view);
-  const firstDone = view.locator(".note", { hasText: "Done: the offset" });
-  await view.locator(".note").last().scrollIntoViewIfNeeded();
-  await takeScreenshot(page, "racers-vote", page.locator(".canvas-panel:visible"), { from: firstDone, downTo: view.locator(".note").last() });
+  await takeScreenshot(page, "pick-the-work", page.locator(".canvas-panel:visible"), { downTo: view.getByRole("button", { name: "Let the captain pick" }) });
 });

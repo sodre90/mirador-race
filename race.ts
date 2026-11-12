@@ -1,11 +1,26 @@
-/** Who decides when the racers have finished: the conversation that started the race, or the racers' vote and then it. */
+/** Who ranks the work when the racers have finished: nobody, or the racers' vote before the pick. */
 export type Decide = "captain" | "vote";
 
-export type RacerState = "starting" | "working" | "finished" | "stopped" | "failed";
+/** checking: its work ended and Race runs the race's check in its folder. */
+export type RacerState = "starting" | "working" | "checking" | "finished" | "stopped" | "failed";
+
+export type CheckOutcome = "passed" | "failed" | "timed out" | "stopped";
+
+/** What Race's own run of the race's check in a racer's folder said. */
+export interface CheckResult {
+  outcome: CheckOutcome;
+  /** Null when it ran out of time or was stopped. */
+  exitCode: number | null;
+  durationMs: number;
+  /** The end of what it printed, standard output and errors together. */
+  output: string;
+}
 
 export interface Racer {
   number: number;
   conversationId: string;
+  /** The profile it runs on, by name. */
+  profile: string;
   folder: string;
   branch: string;
   state: RacerState;
@@ -13,6 +28,10 @@ export interface Racer {
   changes: string | null;
   /** The start of its last message, once its work ended. */
   said: string | null;
+  startedAt: number;
+  /** When its work ended, before Race checked it. */
+  endedAt: number | null;
+  check: CheckResult | null;
 }
 
 export interface Note {
@@ -31,21 +50,31 @@ export interface Vote {
 export interface Standing {
   racer: number;
   points: number;
+  /** The voters that ranked it first. */
+  firsts: number[];
 }
 
 /**
- * racing: the racers work. voting: they rank each other's work. deciding: the conversation that started the race was
- * told to pick. stopped: the user stopped it.
+ * setup: the form the user fills in. racing: the racers work. voting: they rank each other's work. picking: it waits for
+ * the user to pick the work on its page. deciding: the conversation that started the race picks, or takes what the user
+ * picked. stopped: the user stopped it.
  */
-export type Phase = "racing" | "voting" | "deciding" | "stopped";
+export type Phase = "setup" | "racing" | "voting" | "picking" | "deciding" | "stopped";
 
 export interface Race {
   id: string;
   task: string;
-  profile: string;
+  /** The profiles the racers were asked to run on, by racer number from 1. */
+  profiles: string[];
   check: string | null;
   decide: Decide;
   phase: Phase;
+  /**
+   * The user started it, from its form or the slash menu: it waits for their pick rather than the captain's, and Race
+   * runs its check, which the user typed. The agent's check runs only in the agents' own shells, where Mirador's
+   * permissions ask.
+   */
+  startedByUser: boolean;
   /** How many racers it starts. */
   size: number;
   racers: Racer[];
@@ -55,10 +84,24 @@ export interface Race {
   votes: Vote[];
   abstained: number[];
   standings: Standing[] | null;
+  /** What the user picked on the page, in a few words. */
+  picked: string | null;
   /** The commit every racer started from, once git knows all their branches. */
   base: string | null;
   startedAt: number;
 }
+
+/** What the user, or the agent, asks a race to be. */
+export interface RaceRequest {
+  task: string;
+  profiles: string[];
+  size: number;
+  check: string | null;
+  decide: Decide;
+}
+
+/** What the user picked on a race's page. */
+export type RacePick = { kind: "take"; racer: number } | { kind: "combine"; racers: number[]; how: string } | { kind: "captain" };
 
 export const NOTE_LIMIT = 2000;
 export const SAID_LIMIT = 1500;
@@ -68,17 +111,66 @@ export const MIN_RACERS = 2;
 export const MAX_RACERS = 6;
 export const DEFAULT_RACERS = 4;
 
-export const isWorking = ({ state }: Racer) => state === "starting" || state === "working";
+/** Its conversation works on the task. */
+export const conversationWorks = ({ state }: Racer) => state === "starting" || state === "working";
+
+/** Its conversation works on the task, or Race checks what it did. */
+export const isWorking = (racer: Racer) => conversationWorks(racer) || racer.state === "checking";
 
 export const cut = (text: string, limit: number) => (text.length <= limit ? text : `${text.slice(0, limit)}…`);
 
 /** A short id for the race, for titles and the agent's messages. */
 export const newRaceId = () => crypto.randomUUID().slice(0, 6);
 
-export const raceTitle = (task: string) => `Race · ${cut(task.split("\n")[0]!.trim(), 50)}`;
+export const raceTitle = (task: string) => (task.trim() ? `Race · ${cut(task.split("\n")[0]!.trim(), 50)}` : "Race");
 
-export function racerPrompt(race: Pick<Race, "id" | "task" | "check">, number: number, of: number) {
-  const check = race.check ? `\n- Before you finish, run \`${race.check}\` in your folder and make it pass.` : "";
+/** Racer `number`'s profile: the profiles asked for, in turn. */
+export const profileOf = (profiles: string[], number: number) => profiles[(number - 1) % profiles.length]!;
+
+/**
+ * The race the user or the agent asked for, or why it can't be one. Racers run on `profiles` in turn, or all on
+ * `profile`; there are `racers` of them, else one per profile when several are named, else DEFAULT_RACERS.
+ */
+export function raceRequest(input: { task?: string; profile?: string; profiles?: string[]; racers?: number; check?: string; decide?: Decide }): RaceRequest | string {
+  const task = input.task?.trim() ?? "";
+  const profiles = (input.profiles ?? (input.profile ? [input.profile] : [])).map((profile) => profile.trim()).filter(Boolean);
+  if (!task) return "Say what the racers should do: the task.";
+  if (profiles.length === 0) return "Name the profile the racers run on, or a profile for each racer.";
+  const size = input.racers ?? (profiles.length >= MIN_RACERS ? profiles.length : DEFAULT_RACERS);
+  if (!Number.isInteger(size) || size < MIN_RACERS || size > MAX_RACERS) return `A race has ${MIN_RACERS} to ${MAX_RACERS} racers.`;
+  return { task, profiles, size, check: input.check?.trim() || null, decide: input.decide === "vote" ? "vote" : "captain" };
+}
+
+/** A race not started yet: its form, with what the user already said. */
+export function blankRace(request: Partial<RaceRequest>): Race {
+  const size = request.size ?? (request.profiles && request.profiles.length >= MIN_RACERS ? request.profiles.length : DEFAULT_RACERS);
+  return {
+    id: newRaceId(),
+    task: request.task ?? "",
+    profiles: request.profiles ?? [],
+    check: request.check ?? null,
+    decide: request.decide ?? "captain",
+    phase: "setup",
+    startedByUser: true,
+    size,
+    racers: [],
+    board: [],
+    voters: [],
+    votes: [],
+    abstained: [],
+    standings: null,
+    picked: null,
+    base: null,
+    startedAt: Date.now(),
+  };
+}
+
+/** Race runs the race's check itself only when the user typed it. */
+export const raceChecks = (race: Pick<Race, "check" | "startedByUser">) => race.check !== null && race.startedByUser;
+
+export function racerPrompt(race: Pick<Race, "id" | "task" | "check" | "startedByUser">, number: number, of: number) {
+  const alsoByRace = raceChecks(race) ? "; Race runs it there too once you finish" : "";
+  const check = race.check ? `\n- Before you finish, run \`${race.check}\` in your folder and make it pass${alsoByRace}.` : "";
   return `${race.task}
 
 ---
@@ -92,25 +184,65 @@ How to work:
 - When you are done, commit your work on your branch with a one-line message, post a last note saying what you did and how you checked it, and end with a short summary.`;
 }
 
+const seconds = (ms: number) => {
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)} s`;
+  const total = Math.round(ms / 1000);
+  return total < 60 ? `${total} s` : `${Math.floor(total / 60)} min ${total % 60} s`;
+};
+
+/** What Race's check said in a racer's folder, in a few words, e.g. "passed in 42 s". */
+export function checkWords(result: CheckResult) {
+  if (result.outcome === "failed") return `failed with exit code ${result.exitCode} in ${seconds(result.durationMs)}`;
+  if (result.outcome === "timed out") return `ran out of time after ${seconds(result.durationMs)}`;
+  return `${result.outcome} ${result.outcome === "stopped" ? "after" : "in"} ${seconds(result.durationMs)}`;
+}
+
 export function votePrompt(race: Race, voter: number) {
   const others = race.racers.filter(({ number, state }) => number !== voter && state === "finished");
-  const folders = others.map(({ number, folder }) => `racer ${number}: ${folder}`).join("\n");
-  const check = race.check ? ` You may run \`${race.check}\` in their folders:\n${folders}\n` : "";
-  return `All racers of race ${race.id} have finished. Vote on the others' work: read each with race_peek (racers ${others.map(({ number }) => number).join(", ")}).${check}
-Then call race_vote with their numbers, best first, and why in a few lines. Don't rank yourself.`;
+  const checked = raceChecks(race)
+    ? `\nRace ran \`${race.check}\` in each folder:\n${others.map(({ number, check }) => `- racer ${number}: ${check ? checkWords(check) : "not run"}`).join("\n")}\n`
+    : "";
+  return `All racers of race ${race.id} have finished. Vote on the others' work: read each with race_peek (racers ${others.map(({ number }) => number).join(", ")}).${checked}
+Then call race_vote with their numbers, best first, and why in a few lines. Don't rank yourself, and don't run long jobs: vote in this turn.`;
 }
 
 /**
- * Each voter's ranking gives the racer it puts first as many points as it ranked others below it, and the last none; the
- * racers come out with the most points first, a tie in the order they raced.
+ * Each voter's ranking gives a racer as many points as it ranked others below it, so the last gets none and a voter
+ * that abstains takes nothing from anyone; the racers come out with the most points first, then the most first places,
+ * then in the order they raced.
  */
 export function tally(race: Pick<Race, "racers" | "votes">): Standing[] {
-  const points = new Map(race.racers.filter(({ state }) => state === "finished").map(({ number }) => [number, 0]));
-  for (const { ranking } of race.votes) {
-    ranking.forEach((racer, place) => points.set(racer, (points.get(racer) ?? 0) + ranking.length - 1 - place));
+  const standings = new Map(race.racers.filter(({ state }) => state === "finished").map(({ number }) => [number, { racer: number, points: 0, firsts: [] as number[] }]));
+  for (const { racer: voter, ranking } of race.votes) {
+    ranking.forEach((racer, place) => {
+      const standing = standings.get(racer);
+      if (!standing) return;
+      standing.points += ranking.length - 1 - place;
+      if (place === 0) standing.firsts.push(voter);
+    });
   }
-  return [...points].map(([racer, points]) => ({ racer, points })).sort((one, other) => other.points - one.points || one.racer - other.racer);
+  return [...standings.values()].sort((one, other) => other.points - one.points || other.firsts.length - one.firsts.length || one.racer - other.racer);
 }
+
+/** Two racers that each ranked the other first, the only ranking two can give. */
+const eachRankedTheOtherFirst = (race: Pick<Race, "votes">, standings: Standing[]) =>
+  standings.length === 2 && race.votes.length === 2 && standings.every(({ firsts }) => firsts.length === 1);
+
+const racersWords = (numbers: number[]) => `${numbers.length === 1 ? "racer" : "racers"} ${numbers.join(", ")}`;
+
+/** How the vote came out, in a line, e.g. "racer 3: 2 points, ranked first by racers 1, 2; …", or the tie two racers make. */
+export function standingsWords(race: Pick<Race, "votes">, standings: Standing[]) {
+  if (eachRankedTheOtherFirst(race, standings)) return "A tie: each ranked the other first.";
+  const pointsCount = standings.some(({ points }) => points > 0);
+  const line = ({ racer, points, firsts }: Standing) => {
+    const parts = [...(pointsCount ? [`${points} ${points === 1 ? "point" : "points"}`] : []), ...(firsts.length > 0 ? [`ranked first by ${racersWords(firsts)}`] : [])];
+    return `racer ${racer}${parts.length > 0 ? `: ${parts.join(", ")}` : ": ranked first by nobody"}`;
+  };
+  return `${standings.map(line).join("; ")}.`;
+}
+
+/** A voter's ranking, e.g. "ranked 3 first, then 2". */
+export const rankingWords = ([first, ...rest]: number[]) => `ranked ${first} first${rest.length > 0 ? `, then ${rest.join(", ")}` : ""}`;
 
 /** Why a ranking isn't a vote this racer can cast, or null when it is. */
 export function refusalOfVote(race: Race, voter: number, ranking: number[]): string | null {
@@ -120,14 +252,6 @@ export function refusalOfVote(race: Race, voter: number, ranking: number[]): str
   return `Rank each of the other racers that finished exactly once, best first: ${others.join(", ")}.`;
 }
 
-const stateWords: Record<RacerState, string> = {
-  starting: "starting",
-  working: "working",
-  finished: "finished",
-  stopped: "stopped",
-  failed: "failed",
-};
-
 const ago = (at: number, now: number) => {
   const minutes = Math.round((now - at) / 60_000);
   return minutes < 1 ? "just now" : `${minutes} min ago`;
@@ -136,9 +260,7 @@ const ago = (at: number, now: number) => {
 /** Who posted a note: a racer, or the conversation that started the race, whose notes carry racer 0. */
 const authorOf = (racer: number) => (racer === 0 ? "the captain" : `racer ${racer}`);
 
-const pointsWords = (points: number) => `${points} ${points === 1 ? "point" : "points"}`;
-
-export const racerLine = ({ number, state, changes }: Racer) => `racer ${number}: ${stateWords[state]}${changes ? `, ${changes}` : ""}`;
+export const racerLine = ({ number, state, changes }: Racer) => `racer ${number}: ${state}${changes ? `, ${changes}` : ""}`;
 
 /** What race_board answers a racer: the others' notes it hasn't read yet, and where every racer stands. */
 export function boardAnswer(race: Race, reader: number | null, unread: Note[], now: number) {
@@ -147,24 +269,74 @@ export function boardAnswer(race: Race, reader: number | null, unread: Note[], n
   return `Race ${race.id} board.${you}\n\n${notes}\n\nWhere the racers are:\n${race.racers.map(racerLine).join("\n")}\n\nRead a racer's work with race_peek; post what you learn with race_board.`;
 }
 
-/** What the conversation that started the race hears once the racers have finished, and the vote if there was one. */
-export function decidePrompt(race: Race) {
+const baseWords = (race: Race) => race.base ?? "the commit the workspace had checked out when the race started";
+
+function racerSummary(racer: Racer) {
+  const check = racer.check ? ` · check ${checkWords(racer.check)}` : "";
+  const said = racer.said ? `\n  It said: ${racer.said.replaceAll("\n", "\n  ")}` : "";
+  return `- Racer ${racer.number} (${racer.profile}): ${racer.state} · branch ${racer.branch} · folder ${racer.folder} · ${racer.changes ?? "changes unknown"}${check}${said}`;
+}
+
+/** How the race ended: each racer's branch, folder, changes, check and words, and the vote. */
+function results(race: Race) {
   const finished = race.racers.filter(({ state }) => state === "finished");
-  const lines = race.racers.map((racer) => {
-    const said = racer.said ? `\n  It said: ${racer.said.replaceAll("\n", "\n  ")}` : "";
-    return `- Racer ${racer.number}: ${stateWords[racer.state]} · branch ${racer.branch} · folder ${racer.folder} · ${racer.changes ?? "changes unknown"}${said}`;
-  });
-  const base = race.base ?? "the commit the workspace had checked out when the race started";
-  const vote = race.standings ? `\n\nThe racers voted: ${race.standings.map(({ racer, points }) => `racer ${racer} ${pointsWords(points)}`).join(", ")}.${race.votes.map(({ racer, why }) => `\n- Racer ${racer}: ${why}`).join("")}` : "";
-  const check = race.check ? `\`${race.check}\`` : "the project's checks";
-  if (finished.length === 0) {
-    return `Race ${race.id} is over, and no racer finished its work:\n${lines.join("\n")}\n\nTell the user, and what the racers' conversations say went wrong.`;
-  }
-  return `Race ${race.id} is over: ${finished.length} of ${race.racers.length} racers finished. Each worked on a branch of its own, from ${base}:\n${lines.join("\n")}${vote}
+  const vote = race.standings
+    ? `\n\nThe racers voted: ${standingsWords(race, race.standings)}${race.votes.map(({ racer, ranking, why }) => `\n- Racer ${racer} ${rankingWords(ranking)}: ${why}`).join("")}`
+    : "";
+  return `Race ${race.id} is over: ${finished.length} of ${race.racers.length} racers finished. Each worked on a branch of its own, from ${baseWords(race)}:\n${race.racers.map(racerSummary).join("\n")}${vote}`;
+}
+
+const nobodyFinished = (race: Race) => race.racers.every(({ state }) => state !== "finished");
+
+function nobodyFinishedPrompt(race: Race) {
+  return `Race ${race.id} is over, and no racer finished its work:\n${race.racers.map(racerSummary).join("\n")}\n\nTell the user, and what the racers' conversations say went wrong.`;
+}
+
+const checkName = (race: Race) => (race.check ? `\`${race.check}\`` : "the project's checks");
+
+const howToTake = (race: Race) =>
+  `commit a racer's work on its branch if it left some uncommitted, then \`git merge --squash <branch>\` or \`git cherry-pick\`, or copy the parts you want. Run ${checkName(race)} again on the result`;
+
+/** What the conversation that started the race hears once it's over and the pick is its own. */
+export function decidePrompt(race: Race) {
+  if (nobodyFinished(race)) return nobodyFinishedPrompt(race);
+  const firstStep = raceChecks(race) ? `Race ran ${checkName(race)} in each finished racer's folder; what it said is above.` : `Run ${checkName(race)} in each finished racer's folder.`;
+  return `${results(race)}
 
 Now decide:
-1. Run ${check} in each finished racer's folder.
+1. ${firstStep}
 2. Read their work: race_peek, or \`git -C <folder> diff ${race.base ?? "<base>"}\` with \`git -C <folder> status\` for new files.
-3. Take the best into your own branch, or combine the best parts: commit a racer's work on its branch if it left some uncommitted, then \`git merge --squash <branch>\` or \`git cherry-pick\`, or copy the parts you want. Run the check again on the result.
+3. Take the best into your own branch, or combine the best parts: ${howToTake(race)}.
 4. Tell the user which racer's work you took and why, and what the check said.`;
+}
+
+/** What the conversation that started the race hears once it's over, when the user picks the work on its page. */
+export function pickingPrompt(race: Race) {
+  if (nobodyFinished(race)) return nobodyFinishedPrompt(race);
+  return `${results(race)}
+
+The user picks the work to take on the race page and will tell you what to take. Don't merge or change anything until then: answer in one line that race ${race.id} is over and waits for their pick.`;
+}
+
+/** What the user's pick on the page sends the conversation that started the race, as their own message. */
+export function pickMessage(race: Race, pick: RacePick): string {
+  if (pick.kind === "captain") return decidePrompt(race);
+  const racers = pick.kind === "take" ? [pick.racer] : pick.racers;
+  const chosen = racers.map((number) => race.racers.find((racer) => racer.number === number && racer.state === "finished"));
+  if (chosen.some((racer) => !racer)) throw new Error(`Pick among the racers that finished: ${race.racers.filter(({ state }) => state === "finished").map(({ number }) => number).join(", ")}.`);
+  const lines = (chosen as Racer[]).map(racerSummary).join("\n");
+  const from = `They started from ${baseWords(race)}.`;
+  if (pick.kind === "take") {
+    return `Take racer ${pick.racer}'s work from race ${race.id} into your branch:\n${lines}\n${from}\nTo take it, ${howToTake(race)}, and tell me what it said.`;
+  }
+  if (racers.length < 2) throw new Error("Pick at least two racers to combine.");
+  const how = pick.how.trim() ? `\n\nHow to combine them: ${pick.how.trim()}` : "";
+  return `Combine the work of racers ${racers.join(", ")} from race ${race.id} in your branch:\n${lines}\n${from}${how}\n\nRead each with race_peek or \`git -C <folder> diff ${race.base ?? "<base>"}\`, take the parts that fit together, run ${checkName(race)} on the result, and tell me what you took from each and what the check said.`;
+}
+
+/** The pick in a few words, for the page. */
+export function pickWords(pick: RacePick) {
+  if (pick.kind === "take") return `You took racer ${pick.racer}'s work`;
+  if (pick.kind === "combine") return `You asked to combine racers ${pick.racers.join(", ")}`;
+  return "You let the captain pick";
 }
