@@ -1,0 +1,9 @@
+{
+  "name": "race",
+  "title": "Race",
+  "icon": "icon.svg",
+  "version": "0.1.0",
+  "api": 12,
+  "tellsCaller": true,
+  "canvas": { "host": "host.ts", "view": "view.js" }
+}

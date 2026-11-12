@@ -1,0 +1,14 @@
+{
+  "name": "mirador-race",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test tests",
+    "e2e": "scripts/e2e.sh"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}
