@@ -2,7 +2,7 @@
   "name": "race",
   "title": "Race",
   "icon": "icon.svg",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "api": 13,
   "tellsCaller": true,
   "description": "Race a task on several agents at once, such as four of a small local model, or one on each of several profiles to compare them, each in a git worktree of its own. They share a board where they post what they learn and borrow from each other's work. The race page gives each racer a lane: its time, changes, latest note and, for a race you started, the check Race ran in its folder. Then you take the best work, or combine the best parts, from the page, or the conversation that started the race picks.",

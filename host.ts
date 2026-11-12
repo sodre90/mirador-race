@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import type { CanvasActionContext, CanvasHost, CanvasPluginContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivityEvent, StartedConversation } from "./mirador/api.ts";
-import { CheckQueue } from "./check.ts";
+import { CheckQueue, endLeftover, type StartedCheck } from "./check.ts";
 import { changesOf, diffOf, raceBase } from "./git.ts";
 import {
   DIFF_LIMIT,
@@ -71,7 +71,9 @@ type PageAction =
   | ({ kind: "start" } & RaceInput)
   | { kind: "stop" }
   | { kind: "diff"; racer: number }
-  | { kind: "pick"; pick: RacePick };
+  | { kind: "resume" }
+  | { kind: "pick"; pick: RacePick }
+  | { kind: "picked"; pick: RacePick };
 
 /** What starting a race takes of the conversation it starts from, a tool's call or the user's press on the form. */
 type StartsRacers = CanvasPluginContext<Race> & Pick<CanvasActionContext<Race>, "startConversation" | "stopConversation" | "prompt">;
@@ -79,6 +81,8 @@ type StartsRacers = CanvasPluginContext<Race> & Pick<CanvasActionContext<Race>, 
 const raceKey = (id: string) => `race:${id}`;
 const racerKey = (conversationId: string) => `racer:${conversationId}`;
 const readKey = (conversationId: string) => `read:${conversationId}`;
+/** A racer's running check, by its pid and start, which a restart of Mirador in place leaves running. */
+const startedCheckKey = (id: string, number: number) => `check:${id}:${number}`;
 const RACES = "races";
 
 /** The conversations' contexts this run of Mirador has seen: the captain's to change its race page and tell it, a racer's to ask for its vote. */
@@ -88,6 +92,8 @@ const refreshes = new Map<string, { running: boolean; last: number }>();
 /** The forms whose Start is starting their race, so a second press doesn't start it twice. */
 const startingForms = new Set<string>();
 const checks = new CheckQueue(CHECKS_AT_ONCE);
+/** The racers this run of Mirador checks, by `startedCheckKey`; a racer still checking but not here had its check cut short by a restart. */
+const checksUnderWay = new Set<string>();
 
 const keptRace = (storage: CanvasPluginStorage, id: string) => storage.get(raceKey(id)) as KeptRace | undefined;
 const keptRacer = (storage: CanvasPluginStorage, conversationId: string) => storage.get(racerKey(conversationId)) as KeptRacer | undefined;
@@ -288,14 +294,36 @@ function racerEnded(storage: CanvasPluginStorage, conversationId: string, reply:
   return { race: racer.race, number: racer.number, toCheck: toCheck as { command: string; folder: string } | null };
 }
 
+/** Runs the race's check in the racer's folder, ending first what's left of a run of it a restart of Mirador cut short. */
 async function checkRacer(storage: CanvasPluginStorage, id: string, number: number, { command, folder }: { command: string; folder: string }) {
-  const result = await checks.check(id, command, folder);
-  update(storage, id, (race) => {
-    const checked = race.racers.find((racer) => racer.number === number);
-    if (!checked) return;
-    checked.check = result;
-    checked.state = "finished";
-  });
+  const key = startedCheckKey(id, number);
+  checksUnderWay.add(key);
+  try {
+    const leftover = storage.get(key) as StartedCheck | undefined;
+    if (leftover) await endLeftover(leftover);
+    const result = await checks.check(id, command, folder, (started) => storage.set(key, started));
+    update(storage, id, (race) => {
+      const checked = race.racers.find((racer) => racer.number === number);
+      if (!checked) return;
+      checked.check = result;
+      checked.state = "finished";
+    });
+  } finally {
+    checksUnderWay.delete(key);
+    storage.set(key, undefined);
+  }
+}
+
+/**
+ * A race a restart of Mirador cut short goes on: the checks it cut short run again, as nothing else would end those
+ * racers, and a race whose racers had all ended moves on to the vote or the pick.
+ */
+async function resumeRace(storage: CanvasPluginStorage, id: string) {
+  const race = keptRace(storage, id)?.race;
+  if (race?.phase !== "racing") return;
+  const cutShort = race.racers.filter(({ number, state }) => state === "checking" && !checksUnderWay.has(startedCheckKey(id, number)));
+  await Promise.all(cutShort.map(({ number, folder }) => checkRacer(storage, id, number, { command: race.check!, folder })));
+  await afterTheRace(storage, id);
 }
 
 /** The voters whose vote turn has begun, by race, so the end of the turn they finished the race in isn't taken for their vote's. */
@@ -333,17 +361,24 @@ async function stopRace(id: string, context: CanvasActionContext<Race>) {
   return { stopped: true };
 }
 
-/** The user's pick goes to the captain as their own message, which the page sends; the race is then the captain's to finish. */
-function pick(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
+function racePicking(id: string, storage: CanvasPluginStorage) {
   const race = keptRace(storage, id)?.race;
   if (!race) throw new Error("This race is no longer kept.");
   if (race.phase !== "picking") throw new Error(`Race ${race.id} isn't waiting for a pick.`);
-  const message = pickMessage(race, chosen);
-  update(storage, id, (changed) => {
-    changed.phase = "deciding";
-    changed.picked = pickWords(chosen);
+  return race;
+}
+
+/** The message that hands the user's pick to the captain, which the page sends as their own. */
+const pick = (id: string, chosen: RacePick, storage: CanvasPluginStorage) => ({ message: pickMessage(racePicking(id, storage), chosen) });
+
+/** Once the page sent the pick, the race is the captain's to finish. */
+function picked(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
+  racePicking(id, storage);
+  update(storage, id, (race) => {
+    race.phase = "deciding";
+    race.picked = pickWords(chosen);
   });
-  return { message };
+  return { picked: true };
 }
 
 const raceDescription =
@@ -487,8 +522,13 @@ const host: CanvasHost<Race> = {
     if (asked.kind === "start") return startFromForm(item, asked, context);
     if (asked.kind === "stop") return stopRace(id, context);
     if (asked.kind === "diff") return { diff: await racerWork(context.storage, id, asked.racer) };
+    if (asked.kind === "resume") {
+      resumeRace(context.storage, id).catch((error) => console.error(`race ${id} could not go on after a restart:`, error));
+      return { resuming: true };
+    }
     if (asked.kind === "pick") return pick(id, asked.pick, context.storage);
-    throw new Error("A race's page starts and stops its race, shows a racer's changes and takes the user's pick.");
+    if (asked.kind === "picked") return picked(id, asked.pick, context.storage);
+    throw new Error("A race's page starts and stops its race, shows a racer's changes, carries it on after a restart and takes the user's pick.");
   },
   async activity(event, context) {
     await hearActivity(event, context.storage);

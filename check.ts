@@ -6,6 +6,8 @@ export const CHECK_OUTPUT_LIMIT = 4_000;
 const STOP_GRACE_MS = 5_000;
 
 export interface RunningCheck {
+  /** Its shell's pid, which is its process group's too; null for a check that couldn't start. */
+  pid: number | null;
   result: Promise<CheckResult>;
   stop(): void;
 }
@@ -40,6 +42,7 @@ function signalGroup(pid: number, signal: NodeJS.Signals) {
 
 /** A check that couldn't start, such as in a folder that's gone, fails with the reason. */
 const failedToStart = (error: unknown): RunningCheck => ({
+  pid: null,
   result: Promise.resolve({ outcome: "failed", exitCode: null, durationMs: 0, output: error instanceof Error ? error.message : String(error) }),
   stop() {},
 });
@@ -77,26 +80,77 @@ export function runCheck(command: string, folder: string, { timeoutMs = CHECK_TI
     if (endedEarly) return { outcome: endedEarly, exitCode: null, durationMs, output: tail.end };
     return { outcome: exitCode === 0 ? "passed" : "failed", exitCode, durationMs, output: tail.end };
   })();
-  return { result, stop: () => end("stopped") };
+  return { pid: child.pid, result, stop: () => end("stopped") };
 }
 
-/** Runs checks a few at a time, as several test suites at once would slow each other down; `stopRace` ends a race's. */
+const isGroupAlive = (pid: number) => {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** A process that started this close to when Race started a check on its pid is that check; ps counts whole seconds. */
+const SAME_START_SLACK_MS = 3_000;
+
+/** How long `pid` has run, from ps's [[dd-]hh:]mm:ss, or null when no process has it. */
+async function secondsRunning(pid: number) {
+  const ps = Bun.spawn(["ps", "-o", "etime=", "-p", String(pid)], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+  const [shown] = await Promise.all([new Response(ps.stdout).text(), ps.exited]);
+  const parts = shown.trim().match(/^(?:(?:(\d+)-)?(\d+):)?(\d+):(\d+)$/);
+  if (!parts) return null;
+  const [, days = "0", hours = "0", minutes = "0", seconds = "0"] = parts;
+  return ((Number(days) * 24 + Number(hours)) * 60 + Number(minutes)) * 60 + Number(seconds);
+}
+
+/** A check's pid and when it started, which tell it from a process that took its pid since. */
+export interface StartedCheck {
+  pid: number;
+  startedAt: number;
+}
+
+/**
+ * Ends a check an earlier run of Mirador started, if it still runs: a restart in place leaves it running, and a second
+ * run of it in the same folder could fail them both. Its group gets SIGTERM, then SIGKILL if it's still there `graceMs` on.
+ */
+export async function endLeftover({ pid, startedAt }: StartedCheck, { graceMs = STOP_GRACE_MS } = {}) {
+  const running = await secondsRunning(pid);
+  if (running === null || Math.abs(Date.now() - running * 1000 - startedAt) > SAME_START_SLACK_MS) return;
+  signalGroup(pid, "SIGTERM");
+  const giveUpAt = Date.now() + graceMs;
+  while (isGroupAlive(pid) && Date.now() < giveUpAt) await Bun.sleep(50);
+  signalGroup(pid, "SIGKILL");
+}
+
+/**
+ * Runs checks a few at a time, as several test suites at once would slow each other down; `stopRace` ends a race's,
+ * and its checks asked for later end as stopped at once.
+ */
 export class CheckQueue {
   private running = 0;
   private readonly waiting: { race: string; run: () => void; drop: () => void }[] = [];
   private readonly started = new Map<string, Set<RunningCheck>>();
+  private readonly stoppedRaces = new Set<string>();
 
   constructor(
     private readonly atOnce: number,
     private readonly start: (command: string, folder: string) => RunningCheck = runCheck,
   ) {}
 
-  /** Resolves to what the check said; one whose race stops before it starts resolves as stopped at once. */
-  check(race: string, command: string, folder: string): Promise<CheckResult> {
+  /**
+   * Resolves to what the check said; one whose race stops before it starts resolves as stopped at once. `started` hears
+   * its pid and when it started, as it starts.
+   */
+  check(race: string, command: string, folder: string, started: (check: StartedCheck) => void = () => {}): Promise<CheckResult> {
     return new Promise((resolve) => {
+      const drop = () => resolve({ outcome: "stopped", exitCode: null, durationMs: 0, output: "" });
+      if (this.stoppedRaces.has(race)) return drop();
       const run = () => {
         this.running++;
         const check = this.startOrFail(command, folder);
+        if (check.pid !== null) started({ pid: check.pid, startedAt: Date.now() });
         const ofRace = this.started.get(race) ?? new Set();
         this.started.set(race, ofRace.add(check));
         check.result.then(resolve).finally(() => {
@@ -105,13 +159,13 @@ export class CheckQueue {
           this.next();
         });
       };
-      const drop = () => resolve({ outcome: "stopped", exitCode: null, durationMs: 0, output: "" });
       this.waiting.push({ race, run, drop });
       this.next();
     });
   }
 
   stopRace(race: string) {
+    this.stoppedRaces.add(race);
     const dropped = this.waiting.filter((each) => each.race === race);
     this.waiting.splice(0, this.waiting.length, ...this.waiting.filter((each) => each.race !== race));
     dropped.forEach(({ drop }) => drop());

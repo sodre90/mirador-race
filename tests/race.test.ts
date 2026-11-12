@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import host, { ITEM_TYPE } from "../host.ts";
 import type { CanvasActionContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivity, PluginItem } from "../mirador/api.ts";
-import { runCheck, CheckQueue, type RunningCheck } from "../check.ts";
+import { runCheck, CheckQueue, endLeftover, type RunningCheck } from "../check.ts";
 import { tally, type CheckResult, type Race } from "../race.ts";
 
 let scratch: string;
@@ -421,9 +421,24 @@ test("a race the user started waits for their pick: the captain hears the result
   expect(message).toContain(`Take racer 2's work from race ${race.id} into your branch:`);
   expect(message).toContain(`branch ${mirador.started[1]!.branch} · folder ${mirador.started[1]!.folder}`);
   expect(message).toContain(`They started from ${race.base}.`);
+  expect(mirador.page().phase, "the pick holds until its message went").toBe("picking");
+  expect(await mirador.act({ kind: "picked", pick: { kind: "take", racer: 2 } })).toEqual({ picked: true });
   expect(mirador.page()).toMatchObject({ phase: "deciding", picked: "You took racer 2's work" });
   expect(mirador.promptsTo(mirador.captain.conversationId), "the page sends the pick, as the user's own message").toHaveLength(1);
   await expect(mirador.act({ kind: "pick", pick: { kind: "captain" } })).rejects.toThrow("isn't waiting for a pick");
+  await expect(mirador.act({ kind: "picked", pick: { kind: "captain" } })).rejects.toThrow("isn't waiting for a pick");
+});
+
+test("a pick whose message never went leaves the race waiting for the user's pick", async () => {
+  const mirador = fakeMirador({ caller: "user" });
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+
+  expect(mirador.page()).toMatchObject({ phase: "picking", picked: null });
+  const { message } = (await mirador.act({ kind: "pick", pick: { kind: "take", racer: 2 } })) as { message: string };
+  expect(message).toContain("Take racer 2's work");
 });
 
 test("combining racers asks the captain for the parts the user wants, and letting it pick hands it the decision", async () => {
@@ -435,6 +450,7 @@ test("combining racers asks the captain for the parts the user wants, and lettin
 
   expect(message).toContain(`Combine the work of racers 1, 2 from race ${mirador.page().id} in your branch:`);
   expect(message).toContain("How to combine them: Racer 1's parser, racer 2's tests");
+  await mirador.act({ kind: "picked", pick: { kind: "combine", racers: [1, 2], how: "Racer 1's parser, racer 2's tests" } });
   expect(mirador.page().picked).toBe("You asked to combine racers 1, 2");
 
   const other = fakeMirador({ caller: "user" });
@@ -541,7 +557,7 @@ test("the check queue runs two at a time, and a race's stop drops its waiting ch
     most = Math.max(most, running.size);
     const fake = { finish: (result: CheckResult) => (running.delete(command), resolve(result)), stopped: false };
     fakes.set(command, fake);
-    return { result: promise, stop: () => ((fake.stopped = true), fake.finish({ outcome: "stopped", exitCode: null, durationMs: 1, output: "" })) };
+    return { pid: null, result: promise, stop: () => ((fake.stopped = true), fake.finish({ outcome: "stopped", exitCode: null, durationMs: 1, output: "" })) };
   });
   const passed: CheckResult = { outcome: "passed", exitCode: 0, durationMs: 1, output: "" };
 
@@ -557,6 +573,66 @@ test("the check queue runs two at a time, and a race's stop drops its waiting ch
   expect(fakes.get("a2")!.stopped).toBe(true);
   expect(fakes.get("b1")!.stopped).toBe(false);
   expect(most).toBe(2);
+  expect(await queue.check("a", "a4", scratch), "a stopped race's later check").toMatchObject({ outcome: "stopped", durationMs: 0 });
+  expect(fakes.has("a4")).toBe(false);
+});
+
+const leftoverCheck = () => {
+  const child = Bun.spawn(["sleep", "30"], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  return { pid: child.pid, startedAt: Date.now() };
+};
+
+test("a check left running by a restart is ended, with its group, but not a process that took its pid since", async () => {
+  const other = leftoverCheck();
+  await endLeftover({ pid: other.pid, startedAt: other.startedAt - 60_000 });
+  expect(isAlive(other.pid), "started a minute after the check did, so not the check").toBe(true);
+  process.kill(other.pid, "SIGKILL");
+
+  const leftover = leftoverCheck();
+  await endLeftover(leftover);
+  await until(() => !isAlive(leftover.pid), "the leftover check ended");
+});
+
+test("a racer whose check a restart cut short is checked again once its race's page shows, after what's left of the old check ends", async () => {
+  const mirador = fakeMirador({ caller: "user" });
+  const runs = join(scratch, "runs");
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, check: `echo ran >> ${runs}; grep 42 app.ts` });
+  writeFileSync(join(mirador.started[1]!.folder, "app.ts"), "export const answer = 42;\n");
+  await mirador.replied(1, finished("done"));
+  const id = mirador.page().id;
+  const kept = mirador.captain.storage.get(`race:${id}`) as { race: Race };
+  kept.race.racers[1]!.state = "checking";
+  mirador.captain.storage.set(`race:${id}`, kept);
+  const leftover = leftoverCheck();
+  mirador.captain.storage.set(`check:${id}:2`, leftover);
+
+  expect(await mirador.act({ kind: "resume" })).toEqual({ resuming: true });
+  await mirador.act({ kind: "resume" });
+  await until(() => mirador.page().phase === "picking", "the race over once racer 2 was checked again");
+
+  expect(isAlive(leftover.pid), "what was left of the old check").toBe(false);
+  expect(mirador.page().racers[1]).toMatchObject({ state: "finished", check: { outcome: "passed", exitCode: 0 } });
+  expect(readFileSync(runs, "utf8"), "racer 1's check, then racer 2's once").toBe("ran\nran\n");
+  expect(mirador.captain.storage.get(`check:${id}:2`)).toBeUndefined();
+  const [told] = mirador.promptsTo(mirador.captain.conversationId);
+  expect(told?.text).toContain(`answer in one line that race ${id} is over and waits for their pick.`);
+});
+
+test("a race whose racers had all ended when Mirador restarted, before it moved on, moves on to the pick once its page shows", async () => {
+  const mirador = fakeMirador({ caller: "user" });
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  await mirador.replied(1, finished("done"));
+  const id = mirador.page().id;
+  const kept = mirador.captain.storage.get(`race:${id}`) as { race: Race };
+  Object.assign(kept.race.racers[1]!, { state: "finished", endedAt: Date.now() });
+  mirador.captain.storage.set(`race:${id}`, kept);
+
+  await mirador.act({ kind: "resume" });
+  await until(() => mirador.page().phase === "picking", "the race over");
+
+  expect(mirador.promptsTo(mirador.captain.conversationId)).toHaveLength(1);
+  await mirador.act({ kind: "resume" });
+  expect(mirador.promptsTo(mirador.captain.conversationId), "a race already over isn't told twice").toHaveLength(1);
 });
 
 test("the page shows a racer's changes as a patch, as race_peek does", async () => {

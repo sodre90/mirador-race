@@ -120,7 +120,7 @@ setInterval(() => {
 }, 1000);
 
 /** What the page holds that the race doesn't: the open patches, and the form's answers. */
-const shown = { diffs: new Map(), form: null, profiles: null, combine: new Set(), how: "" };
+const shown = { diffs: new Map(), form: null, profiles: null, combine: new Set(), how: "", resumeAsked: false };
 
 function diffView(text) {
   const lines = text.split("\n").map((line) => {
@@ -252,16 +252,20 @@ function compared(race) {
     .sort((one, other) => (checkRank[one.racer.check?.outcome] ?? 1) - (checkRank[other.racer.check?.outcome] ?? 1) || place(one.racer) - place(other.racer) || one.racer.number - other.racer.number);
 }
 
+/** The pick goes to the captain, then the race records it; one that went but wasn't recorded keeps its buttons off, so it isn't sent twice. */
 async function sendPick(race, pick, problem, buttons) {
   buttons.forEach((button) => (button.disabled = true));
+  let sent = false;
   try {
     const { message } = await window.mirador.send({ kind: "pick", pick });
     await window.mirador.prompt(message);
+    sent = true;
+    await window.mirador.send({ kind: "picked", pick });
     shown.combine.clear();
     shown.how = "";
   } catch (error) {
-    problem.textContent = error.message;
-    buttons.forEach((button) => (button.disabled = false));
+    problem.textContent = sent ? `Your pick went to the conversation that started the race, but the race page couldn't record it: ${error.message}` : error.message;
+    if (!sent) buttons.forEach((button) => (button.disabled = false));
   }
 }
 
@@ -451,8 +455,16 @@ function formView(race) {
 
 let lastRace = null;
 
+/** A race still racing when the page loads may have been cut short by a restart of Mirador, which reloads the page; Race carries it on. */
+function resumeRace(race) {
+  if (shown.resumeAsked || race.phase !== "racing") return;
+  shown.resumeAsked = true;
+  window.mirador.send({ kind: "resume" }).catch((error) => console.error("race: the race could not go on after a restart:", error));
+}
+
 function draw(race) {
   lastRace = race;
+  resumeRace(race);
   const sections = race.phase === "setup" ? formView(race) : raceView(race);
   page.replaceChildren(...sections.filter(Boolean));
 }

@@ -240,3 +240,30 @@ test("/race:race with a task and a profile starts the race at once, and ticking 
   expect(agentSaw()).toContain("How to combine them: racer 1's parser with racer 2's tests");
   await expect(view.getByText("You asked to combine racers 1, 2; the conversation that started the race is on it.")).toBeVisible();
 });
+
+test("a check a restart of Mirador cut short runs again once the race page shows, and the race then waits for the user's pick", async ({ page }) => {
+  const release = join(host.root, "release-checks");
+  const check = join(host.root, "check.sh");
+  writeFileSync(check, `while [ ! -e ${release} ]; do sleep 0.2; done; echo "checked after the restart"\n`);
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  const composer = page.locator(".composer:visible textarea");
+  await composer.fill(`/race:race task="FOLDER restarted" profile=${profileName} racers=2 check="sh ${check}"`);
+  await composer.press("Enter");
+  const raceId = (await page.locator(".plugin-command-reply:visible").textContent())!.match(/Race (\w+) started/)![1]!;
+  const view = helpers().walkthroughView(page);
+  await expect(view.locator(".lane .state.state-checking")).toHaveCount(2);
+
+  await host.restart();
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  await expect(view.getByRole("heading", { name: `Race ${raceId}` })).toBeVisible();
+  await expect(view.locator(".lane .state.state-checking"), "the checks run again, as the release isn't there yet").toHaveCount(2);
+  writeFileSync(release, "");
+
+  await expect(view.getByText("Over: pick the work to take", { exact: false })).toBeVisible({ timeout: 30_000 });
+  const results = view.getByRole("table", { name: "Results" });
+  await expect(results.locator("tbody tr")).toHaveCount(2);
+  await expect(results.getByText(/Passed in [\d.]+ s/)).toHaveCount(2);
+  await expect.poll(agentSaw).toContain(`answer in one line that race ${raceId} is over and waits for their pick.`);
+});
