@@ -2,8 +2,15 @@
   "name": "race",
   "title": "Race",
   "icon": "icon.svg",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "api": 12,
   "tellsCaller": true,
+  "description": "Race a task on several agents of one profile at once, such as four of a small local model, each in a git worktree of its own. They share a board where they post what they learn, read each other's work and borrow what helps, and run your check before they finish. They can rank each other's work; then the conversation that started the race merges the best, or combines the best parts.",
+  "tagline": "Several agents race one task, each in a worktree of its own, sharing a board; the best work gets merged.",
+  "screenshots": [
+    { "path": "screenshots/racers-beside-captain.png", "caption": "Four racers at work under the conversation that started the race, beside the race page" },
+    { "path": "screenshots/race-under-way.png", "caption": "What each racer changed so far, and the board where they share what they learn" },
+    { "path": "screenshots/racers-vote.png", "caption": "The racers say what they did, then rank each other's work" }
+  ],
   "canvas": { "host": "host.ts", "view": "view.js" }
 }
