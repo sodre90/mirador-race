@@ -2,7 +2,7 @@
   "name": "race",
   "title": "Race",
   "icon": "icon.svg",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "api": 12,
   "tellsCaller": true,
   "canvas": { "host": "host.ts", "view": "view.js" }

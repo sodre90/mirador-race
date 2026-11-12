@@ -3,6 +3,7 @@
 # Mirador's e2e helpers. MIRADOR_DIR names Mirador's checkout; by default it sits next to this one.
 # The specs get a copy of the plugin in a temp folder: Mirador's plugins folder links the copy, so the owner's own
 # Mirador, which links this checkout, never runs a test's build.
+# The screenshot spec writes into this checkout's screenshots folder, not the copy's.
 # Usage: scripts/e2e.sh [Playwright arguments]
 set -euo pipefail
 
@@ -16,4 +17,4 @@ existingOwnFiles() { while IFS= read -r -d '' file; do if [[ $file != */ && -e $
 ln -s "$plugin/node_modules" "$copy/node_modules"
 ln -sfn "$mirador/node_modules" "$plugin/e2e/node_modules"
 cd "$mirador"
-MIRADOR_DIR="$mirador" RACE_PLUGIN_DIR="$copy" bunx playwright test -c "$plugin/e2e/playwright.config.ts" "$@"
+MIRADOR_DIR="$mirador" RACE_PLUGIN_DIR="$copy" SCREENSHOTS_DIR="${SCREENSHOTS_DIR:-$plugin/screenshots}" bunx playwright test -c "$plugin/e2e/playwright.config.ts" "$@"

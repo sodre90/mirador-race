@@ -99,7 +99,7 @@ function render(race) {
         })
       : null;
   const check = race.check ? el("span", {}, " · check ", el("code", { text: race.check })) : null;
-  page.replaceChildren(
+  const sections = [
     el(
       "header",
       {},
@@ -110,7 +110,8 @@ function render(race) {
     el("section", {}, racersTable(race), stop, problem),
     el("section", {}, el("h2", { text: "Board" }), board(race)),
     vote(race),
-  );
+  ];
+  page.replaceChildren(...sections.filter(Boolean));
 }
 
 window.mirador.onItem((item) => render(item.data));

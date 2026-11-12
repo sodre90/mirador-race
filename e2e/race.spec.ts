@@ -75,6 +75,8 @@ test("a race starts its racers in worktrees of their own, shows them on its page
     await expect(page.locator(`.sidebar li[data-reorder-id="${captainId}"]`).getByRole("button", { name: "2 delegated" })).toBeVisible();
     await expect(view.getByRole("heading", { name: `Race ${raceId}` })).toBeVisible();
     await expect(view.getByText("FOLDER", { exact: true })).toBeVisible();
+    const looseText = await view.locator("main").evaluate((main) => [...main.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent));
+    expect(looseText, "a race nobody votes on yet shows no vote, not the word null").toEqual([]);
     const rows = view.getByRole("table", { name: "Racers" }).locator("tbody tr[data-racer]");
     await expect(rows).toHaveCount(2);
     await expect.poll(raceBranches, "Mirador makes each racer's worktree after the race page shows it").toHaveLength(2);
