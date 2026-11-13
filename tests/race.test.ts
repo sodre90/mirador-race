@@ -6,7 +6,7 @@ import { join } from "node:path";
 import host, { ITEM_TYPE } from "../host.ts";
 import { runCheck, CheckQueue, endLeftover, type RunningCheck } from "../check.ts";
 import { copyCheckFilesOver } from "../check-files.ts";
-import { raceRequest, tally, type CheckResult, type Race, type Racer } from "../race.ts";
+import { checkWords, raceRequest, tally, type CheckResult, type Race, type Racer } from "../race.ts";
 import { fakeMirador as fakeMiradorIn, finished, git, PROFILES, until } from "./fake-mirador.ts";
 
 let scratch: string;
@@ -1031,6 +1031,49 @@ test("the captain hears that the check ran with the hidden check files", async (
 
   const [told] = mirador.promptsTo(mirador.captain.conversationId);
   expect(told?.text).toMatch(/check passed in [\d.]+ s, with the hidden check files/);
+});
+
+test("hidden check files whose folder is gone fail the racer's check with why, and the race goes on to the pick once the others are done", async () => {
+  const mirador = fakeMirador();
+  const hidden = join(scratch, "hidden");
+  await mkdir(hidden, { recursive: true });
+  writeFileSync(join(hidden, "check.sh"), "exit 0\n");
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, check: "sh check.sh", checkFiles: hidden });
+  await rm(hidden, { recursive: true, force: true });
+
+  await mirador.replied(1, finished("done"));
+
+  const race = mirador.page();
+  expect(race.phase).toBe("racing");
+  expect(race.racers[0]).toMatchObject({ state: "finished", check: { outcome: "failed", exitCode: null } });
+  expect(race.racers[0]!.check!.output).toContain(`Race couldn't copy the hidden check files from ${hidden}:`);
+  expect(race.racers[0]!.check!.durationMs).toBeGreaterThanOrEqual(0);
+
+  await mirador.replied(2, finished("done"));
+
+  expect(mirador.page().phase).toBe("picking");
+  const [told] = mirador.promptsTo(mirador.captain.conversationId);
+  expect(told?.text).toContain("check couldn't run, after");
+});
+
+test("a check whose spawn fails, as in a racer's folder that's gone, finishes the racer and the race goes on to the pick", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, check: "true" });
+  await rm(mirador.started[0]!.folder, { recursive: true, force: true });
+
+  await mirador.replied(1, finished("done"));
+
+  expect(mirador.page().racers[0]).toMatchObject({ state: "finished", check: { outcome: "failed", exitCode: null } });
+  expect(mirador.page().racers[0]!.check!.output).toContain("ENOENT");
+
+  await mirador.replied(2, finished("done"));
+
+  expect(mirador.page().phase).toBe("picking");
+});
+
+test("checkWords says a failed check with no exit code couldn't run", () => {
+  expect(checkWords({ outcome: "failed", exitCode: null, durationMs: 100, output: "Race couldn't run the check: the folder is gone" })).toBe("couldn't run, after 0.1 s");
+  expect(checkWords({ outcome: "failed", exitCode: 3, durationMs: 100, output: "" })).toBe("failed with exit code 3 in 0.1 s");
 });
 
 test("a check queue passes a check's own time limit on", async () => {

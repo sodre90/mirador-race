@@ -33,6 +33,7 @@ import {
   refusalOfVote,
   tally,
   votePrompt,
+  type CheckResult,
   type Decide,
   type Race,
   type RacePick,
@@ -364,15 +365,34 @@ function racerEnded(storage: CanvasPluginStorage, conversationId: string, reply:
   return { race: racer.race, number: racer.number, toCheck: toCheck as { command: string; folder: string; checkFiles: string | null } | null };
 }
 
+/** Records what the check said and ends the racer's checking, so the race goes on as after any check. */
+function racerChecked(storage: CanvasPluginStorage, id: string, number: number, result: CheckResult) {
+  update(storage, id, (race) => {
+    const checked = race.racers.find((racer) => racer.number === number);
+    if (!checked) return;
+    checked.check = result;
+    checked.state = "finished";
+  });
+}
+
+/** A check that couldn't run at all: failed, with no exit code, and why it couldn't run. */
+const failedToRun = (why: string, error: unknown, startedAt: number): CheckResult => ({
+  outcome: "failed",
+  exitCode: null,
+  durationMs: Date.now() - startedAt,
+  output: `${why}: ${error instanceof Error ? error.message : String(error)}`,
+});
+
 /**
  * Runs the race's check in the racer's folder, ending first what's left of a run of it a restart of Mirador cut short.
  * The hidden check files go over the racer's work for the check, and what the racer had comes back after, even when the
- * check is stopped or fails.
+ * check is stopped or fails. One that couldn't run at all fails with why, so its racer ends and the race goes on.
  */
 async function checkRacer(storage: CanvasPluginStorage, id: string, number: number, { command, folder, checkFiles }: { command: string; folder: string; checkFiles: string | null }) {
   const key = startedCheckKey(id, number);
   const ownKey = ownFilesKey(id, number);
   checksUnderWay.add(key);
+  const startedAt = Date.now();
   let kept: KeptOwnFiles | undefined;
   try {
     const leftover = storage.get(key) as StartedCheck | undefined;
@@ -380,16 +400,17 @@ async function checkRacer(storage: CanvasPluginStorage, id: string, number: numb
     if (checkFiles) {
       const leftBehind = storage.get(ownKey) as KeptOwnFiles | undefined;
       if (leftBehind) await putBackOwnFiles(folder, leftBehind);
-      kept = await copyCheckFilesOver(checkFiles, folder);
+      try {
+        kept = await copyCheckFilesOver(checkFiles, folder);
+      } catch (error) {
+        racerChecked(storage, id, number, failedToRun(`Race couldn't copy the hidden check files from ${checkFiles}`, error, startedAt));
+        return;
+      }
       storage.set(ownKey, kept);
     }
-    const result = await checks.check(id, command, folder, (started) => storage.set(key, started));
-    update(storage, id, (race) => {
-      const checked = race.racers.find((racer) => racer.number === number);
-      if (!checked) return;
-      checked.check = result;
-      checked.state = "finished";
-    });
+    racerChecked(storage, id, number, await checks.check(id, command, folder, (started) => storage.set(key, started)));
+  } catch (error) {
+    racerChecked(storage, id, number, failedToRun("Race couldn't run the check", error, startedAt));
   } finally {
     if (kept) await putBackOwnFiles(folder, kept).catch((error) => console.error(`race ${id}: racer ${number}'s own files could not be put back:`, error));
     storage.set(ownKey, undefined);

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { copyCheckFilesOver, filesIn, putBackOwnFiles } from "../check-files.ts";
@@ -8,6 +8,8 @@ import { copyCheckFilesOver, filesIn, putBackOwnFiles } from "../check-files.ts"
 let scratch: string;
 let racer: string;
 let hidden: string;
+let ownTmpdir: string;
+const tmpdirBefore = process.env.TMPDIR;
 
 async function git(folder: string, args: string[]) {
   const child = Bun.spawn(["git", "-C", folder, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -22,10 +24,18 @@ beforeEach(async () => {
   hidden = join(scratch, "hidden");
   await mkdir(racer, { recursive: true });
   await mkdir(hidden, { recursive: true });
+  ownTmpdir = join(scratch, "tmp");
+  await mkdir(ownTmpdir);
+  process.env.TMPDIR = ownTmpdir;
 });
-afterEach(() => rm(scratch, { recursive: true, force: true }));
+afterEach(async () => {
+  process.env.TMPDIR = tmpdirBefore;
+  await chmod(join(hidden, "unreadable.test.ts"), 0o644).catch(() => {});
+  await rm(scratch, { recursive: true, force: true });
+});
 
 const modeOf = async (path: string) => (await stat(path)).mode & 0o777;
+const backups = async () => (await readdir(ownTmpdir)).filter((name) => name.startsWith("race-own-files-"));
 
 test("filesIn lists every file below the folder, relative and sorted", async () => {
   await mkdir(join(hidden, "tests/deep"), { recursive: true });
@@ -68,6 +78,27 @@ test("a check file the racer didn't have is removed after, with the folders copy
   expect(existsSync(join(racer, "hidden/deep/b.test.ts"))).toBe(false);
   expect(existsSync(join(racer, "hidden/deep"))).toBe(false);
   expect(existsSync(join(racer, "hidden"))).toBe(false);
+});
+
+test("a copy that fails partway puts the racer's own files back, and leaves no backup", async () => {
+  await writeFile(join(racer, "a.test.ts"), "the racer's test\n");
+  await writeFile(join(hidden, "a.test.ts"), "the hidden test\n");
+  await writeFile(join(hidden, "unreadable.test.ts"), "the hidden test\n");
+  await chmod(join(hidden, "unreadable.test.ts"), 0o000);
+
+  await expect(copyCheckFilesOver(hidden, racer)).rejects.toThrow();
+
+  expect(await readFile(join(racer, "a.test.ts"), "utf8")).toBe("the racer's test\n");
+  expect(existsSync(join(racer, "unreadable.test.ts"))).toBe(false);
+  expect(await backups()).toEqual([]);
+});
+
+test("check files whose folder is gone leave no backup", async () => {
+  await rm(hidden, { recursive: true });
+
+  await expect(copyCheckFilesOver(hidden, racer)).rejects.toThrow();
+
+  expect(await backups()).toEqual([]);
 });
 
 test("the racer's other files and its git index are left alone", async () => {

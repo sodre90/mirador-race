@@ -219,6 +219,7 @@ const seconds = (ms) => {
 };
 
 function checkWords(check) {
+  if (check.outcome === "failed" && check.exitCode === null) return `Check couldn't run, after ${seconds(check.durationMs)}`;
   if (check.outcome === "failed") return `Check failed (exit code ${check.exitCode}) in ${seconds(check.durationMs)}`;
   if (check.outcome === "timed out") return `Check ran out of time after ${seconds(check.durationMs)}`;
   if (check.outcome === "stopped") return `Check stopped after ${seconds(check.durationMs)}`;
@@ -474,6 +475,7 @@ const standingWords = (standing, pointsCount) => `Racer ${standing.racer}: ${vot
 
 /** What Race's check said, in a table whose column already says it's the check. */
 function shortCheckWords(check) {
+  if (check.outcome === "failed" && check.exitCode === null) return `Couldn't run, after ${seconds(check.durationMs)}`;
   if (check.outcome === "failed") return `Failed (exit code ${check.exitCode}) in ${seconds(check.durationMs)}`;
   if (check.outcome === "timed out") return `Ran out of time after ${seconds(check.durationMs)}`;
   if (check.outcome === "stopped") return `Stopped after ${seconds(check.durationMs)}`;

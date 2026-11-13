@@ -34,10 +34,13 @@ async function copyKeepingMode(from: string, to: string) {
 
 const isFile = (path: string) => stat(path).then((each) => each.isFile(), () => false);
 
-/** Copies the check files over the racer's folder at the same paths, keeping what the racer had there to put back after. */
+/**
+ * Copies the check files over the racer's folder at the same paths, keeping what the racer had there to put back after.
+ * A copy that fails partway puts the racer's own back before it throws.
+ */
 export async function copyCheckFilesOver(checkFiles: string, folder: string): Promise<KeptOwnFiles> {
-  const backup = await mkdtemp(join(tmpdir(), "race-own-files-"));
   const files = await filesIn(checkFiles);
+  const backup = await mkdtemp(join(tmpdir(), "race-own-files-"));
   const paths = await Promise.all(
     files.map(async (path) => {
       const own = join(folder, path);
@@ -45,9 +48,18 @@ export async function copyCheckFilesOver(checkFiles: string, folder: string): Pr
       if (had) await copyKeepingMode(own, join(backup, path));
       return { path, had };
     }),
-  );
-  await Promise.all(files.map((path) => copyKeepingMode(join(checkFiles, path), join(folder, path))));
-  return { backup, paths };
+  ).catch(async (error) => {
+    await rm(backup, { recursive: true, force: true });
+    throw error;
+  });
+  const kept = { backup, paths };
+  const copies = await Promise.allSettled(files.map((path) => copyKeepingMode(join(checkFiles, path), join(folder, path))));
+  const failed = copies.find((copy) => copy.status === "rejected");
+  if (failed) {
+    await putBackOwnFiles(folder, kept);
+    throw failed.reason;
+  }
+  return kept;
 }
 
 /** Puts back exactly what the racer had at the covered paths, removes the folders copying made that are empty again, and takes the backup away. */

@@ -11,7 +11,7 @@ export type CheckOutcome = "passed" | "failed" | "timed out" | "stopped";
 /** What Race's own run of the race's check in a racer's folder said. */
 export interface CheckResult {
   outcome: CheckOutcome;
-  /** Null when it ran out of time or was stopped. */
+  /** Null when it couldn't run, ran out of time or was stopped. */
   exitCode: number | null;
   durationMs: number;
   /** The end of what it printed, standard output and errors together. */
@@ -230,6 +230,7 @@ const seconds = (ms: number) => {
 
 /** What Race's check said in a racer's folder, in a few words, e.g. "passed in 42 s". */
 export function checkWords(result: CheckResult) {
+  if (result.outcome === "failed" && result.exitCode === null) return `couldn't run, after ${seconds(result.durationMs)}`;
   if (result.outcome === "failed") return `failed with exit code ${result.exitCode} in ${seconds(result.durationMs)}`;
   if (result.outcome === "timed out") return `ran out of time after ${seconds(result.durationMs)}`;
   return `${result.outcome} ${result.outcome === "stopped" ? "after" : "in"} ${seconds(result.durationMs)}`;
