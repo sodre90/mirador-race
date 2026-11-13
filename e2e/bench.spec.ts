@@ -157,6 +157,22 @@ test("Stop run stops it", async ({ page }) => {
   await expect(view.getByRole("button", { name: "Stop run" })).toHaveCount(0);
 });
 
+test("The leaderboard shows the set's runs, on the run page and on the form", async ({ page }) => {
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  const view = helpers().walkthroughView(page);
+  await expect(view.getByRole("heading", { name: /^Bench run \w+$/ })).toBeVisible();
+  const row = view.getByRole("table", { name: "Leaderboard" }).locator("tbody tr", { hasText: "racer" });
+  await expect(row).toHaveCount(1);
+  await expect(row.locator("td").nth(1), "the racer took part in both runs").toHaveText("2");
+  await expect(row.locator("td").nth(2), "the stopped run passed none of its one problem").toHaveText("0 of 1");
+  await expect(row.locator("td").nth(3)).toHaveText("0%");
+  await expect(row.locator("td").nth(4), "no earlier run of the same problems").toHaveText("–");
+
+  const form = await openBenchForm(page);
+  await expect(form.getByRole("table", { name: "Leaderboard" }).locator("tbody tr", { hasText: "racer" }).locator("td").nth(1)).toHaveText("2");
+});
+
 test("A run that deletes its racers keeps each one's changes", async ({ page }) => {
   const goFile = join(host.root, "answer-go");
   addProblem("answer", `WRITE [{"waitFor": ${JSON.stringify(goFile)}}]`, "grep -qx 42 answer.txt");

@@ -199,7 +199,7 @@ const median = (values: number[]): number | null => {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 };
 
-const summedCost = (cells: BenchCell[]) => {
+const summedCost = (cells: { usage: ConversationUsage | null }[]) => {
   const costs = cells.flatMap(({ usage }) => (usage?.cost ? [usage.cost] : []));
   const [first] = costs;
   if (!first || costs.some(({ currency }) => currency !== first.currency)) return null;
@@ -288,4 +288,88 @@ export function resultsFileOf(run: BenchRun, totals = totalsOf(run)) {
     })),
     totals,
   };
+}
+
+export type ResultsFile = ReturnType<typeof resultsFileOf>;
+
+type ResultsColumn = ResultsFile["columns"][number];
+type ResultsCell = ResultsFile["cells"][number];
+
+export interface LeaderboardRow {
+  label: string;
+  runs: number;                 // counted runs the model took part in
+  passed: number;               // its latest run's cells that passed
+  passedOnTry2: number;
+  done: number;                 // its latest run's cells with a result
+  passRate: number | null;      // passed ÷ done; null when nothing is done
+  medianSeconds: number | null; // median of the done cells' seconds; null when there are none
+  tokens: number;
+  cost: { amount: number; currency: string } | null;
+  change: number | null;        // passRate minus the previous run's on the same problems; null when there is none
+  sameProblems: boolean;        // whether its latest run's problems are the newest run's
+}
+
+const columnKey = (column: ResultsColumn) =>
+  JSON.stringify(column.ranOn === null ? ["profile", column.profile, column.model, column.effort] : ["model", column.ranOn.model.id, column.ranOn.effort]);
+
+const rowLabel = (column: ResultsColumn) => (column.ranOn === null ? columnLabel(column) : [column.ranOn.model.name, column.ranOn.effort].filter(Boolean).join(" · "));
+
+const problemsOf = (results: ResultsFile) => [...new Set(results.cells.map(({ problem }) => problem))];
+
+const sameProblems = (one: string[], other: string[]) => one.length === other.length && one.every((problem) => other.includes(problem));
+
+const rowStats = (cells: ResultsCell[]) => {
+  const done = cells.filter(({ result }) => result !== null);
+  const passed = done.filter(({ result }) => result === "passed" || result === "passed on try 2");
+  return {
+    passed: passed.length,
+    passedOnTry2: done.filter(({ result }) => result === "passed on try 2").length,
+    done: done.length,
+    passRate: done.length === 0 ? null : passed.length / done.length,
+    medianSeconds: median(done.flatMap(({ seconds }) => (seconds === null ? [] : [seconds]))),
+    tokens: cells.reduce((sum, { usage }) => sum + (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0), 0),
+    cost: summedCost(cells),
+  };
+};
+
+/** A run's columns grouped by model, so two columns on one model add up. */
+const partsOf = (results: ResultsFile) => {
+  const parts = new Map<string, { label: string; cells: ResultsCell[] }>();
+  results.columns.forEach((column, index) => {
+    const key = columnKey(column);
+    const part = parts.get(key) ?? { label: rowLabel(column), cells: [] };
+    part.cells.push(...results.cells.filter((cell) => cell.column === index));
+    parts.set(key, part);
+  });
+  return parts;
+};
+
+/** The newest run's set's models, ranked by the problems they passed, each from its latest run. */
+export function leaderboardOf(results: ResultsFile[]): LeaderboardRow[] {
+  const newest = results.reduce<ResultsFile | undefined>((best, run) => ((run.startedAt ?? -Infinity) > (best?.startedAt ?? -Infinity) ? run : best), undefined);
+  if (!newest) return [];
+  const newestProblems = problemsOf(newest);
+  const runs = results.filter((run) => run.set === newest.set).sort((one, other) => (one.startedAt ?? 0) - (other.startedAt ?? 0));
+  const partsByKey = new Map<string, { label: string; problems: string[]; stats: ReturnType<typeof rowStats> }[]>();
+  runs.forEach((run) => {
+    const problems = problemsOf(run);
+    partsOf(run).forEach(({ label, cells }, key) => {
+      const parts = partsByKey.get(key) ?? [];
+      parts.push({ label, problems, stats: rowStats(cells) });
+      partsByKey.set(key, parts);
+    });
+  });
+  return [...partsByKey.values()]
+    .map((parts) => {
+      const latest = parts.at(-1)!;
+      const previousRate = parts.slice(0, -1).findLast((part) => sameProblems(part.problems, latest.problems))?.stats.passRate ?? null;
+      return {
+        label: latest.label,
+        runs: parts.length,
+        ...latest.stats,
+        change: latest.stats.passRate === null || previousRate === null ? null : latest.stats.passRate - previousRate,
+        sameProblems: sameProblems(latest.problems, newestProblems),
+      };
+    })
+    .sort((one, other) => (other.passRate ?? -1) - (one.passRate ?? -1) || one.tokens - other.tokens || one.label.localeCompare(other.label));
 }

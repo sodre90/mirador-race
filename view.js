@@ -5,7 +5,8 @@
  * Mirador posts the race on every change; what the page does goes to the plugin's host code with `mirador.send`, and
  * the user's pick to the captain with `mirador.prompt`, as their own message.
  * The same file draws a benchmark run's page: its form before it starts, with the set's problems validated on request;
- * then the problems against the columns, each cell its racer's result, with the totals and a cell's details.
+ * then the problems against the columns, each cell its racer's result, with the totals and a cell's details; and a
+ * leaderboard of the models that ran on the set, on the form and once the run is over.
  */
 
 const style = document.createElement("style");
@@ -105,6 +106,7 @@ style.textContent = `
   .matrix button.cell:hover { background: color-mix(in srgb, var(--mirador-text) 8%, transparent); }
   .matrix button.cell[aria-expanded="true"] { background: color-mix(in srgb, var(--mirador-accent) 14%, transparent); }
   .cell-details { display: grid; gap: 8px; margin-top: 8px; padding: 10px 0 6px; border-top: 1px dashed var(--mirador-border); }
+  .leaderboard .other-problems td { color: var(--mirador-faint); }
 
   .podium { display: flex; justify-content: center; align-items: flex-end; gap: 10px; padding-top: 6px; }
   .step { width: 150px; display: grid; justify-items: center; gap: 4px; text-align: center; }
@@ -923,7 +925,7 @@ function draw(race) {
 }
 
 /** What the bench page holds that the run doesn't: the form's answers, the set and profiles it asked for, the open cell and its patch. */
-const shownBench = { form: null, set: null, profiles: null, open: null, diffs: new Map(), resumeAsked: false };
+const shownBench = { form: null, set: null, profiles: null, open: null, diffs: new Map(), resumeAsked: false, leaderboard: null };
 
 const MAX_COLUMNS = 6;
 const MAX_ATTEMPTS = 5;
@@ -1006,6 +1008,48 @@ const cellClass = (cell) => {
   return "check-failed";
 };
 
+const changeWords = (change) => {
+  if (change === null) return "–";
+  const points = Math.round(change * 100);
+  return points > 0 ? `+${points} pts` : points < 0 ? `−${-points} pts` : "0 pts";
+};
+
+/** The set's models ranked by the problems they passed, from the runs kept in its runs/ folder; a row of other problems greys out. */
+function leaderboardView() {
+  const rows = shownBench.leaderboard;
+  const heading = el("h2", { text: "Leaderboard" });
+  if (rows.length === 0) return el("section", {}, heading, el("p", { class: "empty", text: "No runs of this set yet." }));
+  const columns = ["Model", "Runs", "Passed", "Pass rate", "Change", "Median time", "Tokens", "Cost"];
+  return el(
+    "section",
+    {},
+    heading,
+    el(
+      "table",
+      { class: "leaderboard", "aria-label": "Leaderboard" },
+      el("thead", {}, el("tr", {}, columns.map((text) => el("th", { text })))),
+      el(
+        "tbody",
+        {},
+        rows.map((row) =>
+          el(
+            "tr",
+            { class: row.sameProblems ? null : "other-problems" },
+            el("td", {}, row.label, row.sameProblems ? null : el("span", { class: "meta", text: " · other problems" })),
+            el("td", { text: String(row.runs) }),
+            el("td", { text: `${row.passed} of ${row.done}${row.passedOnTry2 > 0 ? ` · ${row.passedOnTry2} on try 2` : ""}` }),
+            el("td", { text: row.passRate === null ? "–" : `${Math.round(row.passRate * 100)}%` }),
+            el("td", { text: changeWords(row.change) }),
+            el("td", { text: row.medianSeconds === null ? "–" : benchSeconds(row.medianSeconds * 1000) }),
+            el("td", { text: tokenWords(row.tokens) }),
+            el("td", { text: row.cost ? costWords(row.cost) : "–" }),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
 function loadBenchSet(run) {
   if (shownBench.set) return;
   shownBench.set = { name: run.set.name, problems: null, problemsLeftOut: [] };
@@ -1029,6 +1073,18 @@ function loadBenchProfiles(run) {
       drawBench(lastBench);
     },
     (error) => console.error("bench: the profiles could not be listed:", error),
+  );
+}
+
+function loadLeaderboard() {
+  if (shownBench.leaderboard) return;
+  shownBench.leaderboard = [];
+  window.mirador.send({ kind: "leaderboard" }).then(
+    (rows) => {
+      shownBench.leaderboard = rows;
+      drawBench(lastBench);
+    },
+    (error) => console.error("bench: the leaderboard could not be read:", error),
   );
 }
 
@@ -1160,6 +1216,7 @@ function benchFormView(run) {
     set.problemsLeftOut.length > 0
       ? el("div", {}, el("strong", { text: "Problems left out" }), el("ul", {}, set.problemsLeftOut.map(({ id, why }) => el("li", { text: `${id}: ${why}` }))))
       : null,
+    leaderboardView(),
     el(
       "div",
       { class: "form" },
@@ -1322,7 +1379,7 @@ function benchRunView(run) {
     run.phase === "running"
       ? el("button", { class: "stop", text: "Stop run", onclick: () => window.mirador.send({ kind: "stop" }).catch((error) => (problem.textContent = error.message)) })
       : null;
-  return [benchHeader(run), el("section", { class: "track" }, benchMatrix(run), cellDetails(run, problem)), el("div", { class: "row" }, stop, problem)];
+  return [benchHeader(run), el("section", { class: "track" }, benchMatrix(run), cellDetails(run, problem)), el("div", { class: "row" }, stop, problem), ["done", "stopped"].includes(run.phase) ? leaderboardView() : null];
 }
 
 let lastBench = null;
@@ -1336,6 +1393,7 @@ function resumeBench(run) {
 
 function drawBench(run) {
   resumeBench(run);
+  loadLeaderboard();
   const sections = run.phase === "setup" ? benchFormView(run) : benchRunView(run);
   page.replaceChildren(...sections.flat().filter(Boolean));
   lastBench = run;

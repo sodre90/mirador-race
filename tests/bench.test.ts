@@ -4,6 +4,7 @@ import {
   cellsToStart,
   cellWords,
   DEFAULT_SETTINGS,
+  leaderboardOf,
   problemSpecOf,
   resultOf,
   resultsFileOf,
@@ -14,6 +15,7 @@ import {
   type BenchCell,
   type BenchColumn,
   type BenchRun,
+  type CellResult,
   type ConversationUsage,
   type TryResult,
 } from "../bench.ts";
@@ -269,4 +271,116 @@ test("resultsFileOf leaves the run's shape, each column's ranOn from its first c
     totals: totalsOf(run),
   });
   expect(resultsFileOf(run, []).totals).toEqual([]);
+});
+
+const resultsOf = (columns: BenchColumn[], cells: BenchCell[], overrides: Partial<BenchRun> = {}) => resultsFileOf(runOf(columns, cells, overrides));
+
+const scored = (problem: string, column: number, result: CellResult, endedAt = 40_000, usage: ConversationUsage | null = null): BenchCell =>
+  cellOf({ problem, column, state: "done", result, startedAt: 0, endedAt, usage });
+
+test("leaderboardOf ranks each model from its latest run, a model new in the second run with no change", () => {
+  const first = resultsOf(
+    [column("racer"), column("Kimi", "opus")],
+    [scored("two-fer", 0, "passed"), scored("bob", 0, "failed", 80_000), scored("two-fer", 1, "passed"), scored("bob", 1, "passed", 80_000)],
+    { id: "first", startedAt: 1_000 },
+  );
+  const second = resultsOf(
+    [column("racer"), column("Fresh")],
+    [scored("two-fer", 0, "passed"), scored("bob", 0, "passed", 80_000), scored("two-fer", 1, "passed"), scored("bob", 1, "failed", 80_000)],
+    { id: "second", startedAt: 2_000 },
+  );
+
+  const rows = leaderboardOf([first, second]);
+  const row = (label: string) => rows.find((each) => each.label === label)!;
+
+  expect(row("racer")).toMatchObject({ runs: 2, passed: 2, done: 2, passRate: 1, change: 0.5, sameProblems: true });
+  expect(row("Kimi · opus")).toMatchObject({ runs: 1, passRate: 1, change: null, sameProblems: true });
+  expect(row("Fresh")).toMatchObject({ runs: 1, passRate: 0.5, change: null, sameProblems: true });
+});
+
+test("leaderboardOf keys a column by its ranOn model when it has one, else its profile, so the two never merge", () => {
+  const opus: RanOn = { model: { id: "opus", name: "Opus" }, effort: "high" };
+  const qwen: RanOn = { model: { id: "qwen3", name: "Qwen3" }, effort: null };
+  const results = resultsOf(
+    [column("Kimi", "opus"), column("Qwen Flash"), column("Qwen3")],
+    [
+      cellOf({ problem: "two-fer", column: 0, state: "done", result: "passed", ranOn: opus }),
+      cellOf({ problem: "two-fer", column: 1, state: "done", result: "passed", ranOn: qwen }),
+      cellOf({ problem: "two-fer", column: 2, state: "done", result: "failed" }),
+    ],
+  );
+
+  const rows = leaderboardOf([results]);
+
+  expect(rows).toHaveLength(3);
+  expect(rows.map(({ label }) => label).sort()).toEqual(["Opus · high", "Qwen3", "Qwen3"]);
+});
+
+test("leaderboardOf adds up the columns of one run that share a model, by profile or by ranOn", () => {
+  const opus: RanOn = { model: { id: "opus", name: "Opus" }, effort: null };
+  const results = resultsOf(
+    [column("racer"), column("racer"), column("Kimi"), column("Qwen Flash")],
+    [
+      scored("two-fer", 0, "passed", 40_000, usageOf(100, 50, 0.5)),
+      scored("bob", 1, "failed", 80_000, usageOf(200, 100, 0.25)),
+      cellOf({ problem: "two-fer", column: 2, state: "done", result: "passed", startedAt: 0, endedAt: 20_000, usage: usageOf(10, 5, 0.125), ranOn: opus }),
+      cellOf({ problem: "bob", column: 3, state: "done", result: "passed on try 2", startedAt: 0, endedAt: 60_000, usage: usageOf(20, 10, 0.25), ranOn: opus }),
+    ],
+  );
+
+  const rows = leaderboardOf([results]);
+  const row = (label: string) => rows.find((each) => each.label === label)!;
+
+  expect(rows).toHaveLength(2);
+  expect(row("racer")).toMatchObject({ runs: 1, passed: 1, passedOnTry2: 0, done: 2, passRate: 0.5, medianSeconds: 60, tokens: 450, cost: { amount: 0.75, currency: "USD" } });
+  expect(row("Opus")).toMatchObject({ runs: 1, passed: 2, passedOnTry2: 1, done: 2, passRate: 1, medianSeconds: 40, tokens: 45, cost: { amount: 0.375, currency: "USD" } });
+});
+
+test("leaderboardOf compares only runs of the same problems, and marks a row whose latest run is of other problems", () => {
+  const first = resultsOf([column("racer")], [scored("two-fer", 0, "passed"), scored("bob", 0, "failed", 80_000)], { id: "first", startedAt: 1_000 });
+  const other = resultsOf(
+    [column("racer"), column("leaper")],
+    [scored("leap", 0, "failed"), scored("leap", 1, "passed")],
+    { id: "other", startedAt: 2_000 },
+  );
+  const newest = resultsOf([column("racer")], [scored("two-fer", 0, "passed"), scored("bob", 0, "passed", 80_000)], { id: "newest", startedAt: 3_000 });
+
+  const rows = leaderboardOf([first, other, newest]);
+  const row = (label: string) => rows.find((each) => each.label === label)!;
+
+  expect(row("racer")).toMatchObject({ runs: 3, passRate: 1, change: 0.5, sameProblems: true });
+  expect(row("leaper")).toMatchObject({ runs: 1, passRate: 1, change: null, sameProblems: false });
+});
+
+test("leaderboardOf leaves out runs of another set", () => {
+  const other = resultsOf(
+    [column("racer"), column("OnlyOther")],
+    [scored("two-fer", 0, "passed"), scored("two-fer", 1, "passed")],
+    { id: "other", startedAt: 1_000, set: { name: "Other", folder: "/sets/other", commit: null } },
+  );
+  const tiny = resultsOf([column("racer")], [scored("two-fer", 0, "failed")], { id: "tiny", startedAt: 2_000 });
+
+  const rows = leaderboardOf([other, tiny]);
+
+  expect(rows.map(({ label }) => label)).toEqual(["racer"]);
+  expect(rows[0]).toMatchObject({ runs: 1, passed: 0, done: 1, passRate: 0 });
+});
+
+test("leaderboardOf sorts by pass rate, null last, then fewer tokens, then label", () => {
+  const results = resultsOf(
+    [column("high"), column("low"), column("none"), column("tie-b"), column("tie-a")],
+    [
+      scored("p", 0, "passed", 40_000, usageOf(400, 100, 0)),
+      scored("p", 1, "failed", 40_000, usageOf(10, 10, 0)),
+      cellOf({ problem: "p", column: 2 }),
+      scored("p", 3, "passed", 40_000, usageOf(50, 50, 0)),
+      scored("p", 4, "passed", 40_000, usageOf(50, 50, 0)),
+    ],
+  );
+
+  expect(leaderboardOf([results]).map(({ label }) => label)).toEqual(["tie-a", "tie-b", "high", "low", "none"]);
+});
+
+test("leaderboardOf gives no rows for no results", () => {
+  expect(leaderboardOf([])).toEqual([]);
 });

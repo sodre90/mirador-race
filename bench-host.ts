@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CanvasActionContext, CanvasPluginContext, CanvasPluginStorage, CanvasTool, ConversationReply, PluginActivityEvent, PluginItem, PluginItemType, PluginProfile, StartedConversation, ToolCaller } from "./mirador/api.ts";
-import { cellsOf, cellsToStart, columnLabel, MAX_ATTEMPTS, MAX_AT_ONCE, newRunId, resultOf, resultsFileOf, retryPrompt, runSummary, type BenchCell, type BenchColumn, type BenchRun, type CellResult } from "./bench.ts";
+import { cellsOf, cellsToStart, columnLabel, leaderboardOf, MAX_ATTEMPTS, MAX_AT_ONCE, newRunId, resultOf, resultsFileOf, retryPrompt, runSummary, type BenchCell, type BenchColumn, type BenchRun, type CellResult, type ResultsFile } from "./bench.ts";
 import { checks, endLeftover, type StartedCheck } from "./check.ts";
 import { copyCheckFiles, loadSet, validateProblem, type LoadedSet, type Problem, type ProblemValidation } from "./sets.ts";
 import { diffOf } from "./git.ts";
@@ -39,7 +39,8 @@ type BenchPageAction =
   | ({ kind: "start" } & BenchInput)
   | { kind: "stop" }
   | { kind: "resume" }
-  | { kind: "diff"; cell: number };
+  | { kind: "diff"; cell: number }
+  | { kind: "leaderboard" };
 
 /** The captain's latest context: a tool's when the run starts, the page's or replied's once they come; only those two can prompt a retry. */
 type CaptainContext = CanvasPluginContext & Pick<CanvasActionContext, "prompt" | "startConversation" | "stopConversation" | "deleteStarted"> & Partial<Pick<CanvasActionContext, "promptStarted">>;
@@ -554,6 +555,21 @@ async function cellWork(storage: CanvasPluginStorage, id: string, index: number)
   return diff.length <= DIFF_LIMIT ? diff : `${diff.slice(0, DIFF_LIMIT)}\n\n[Cut at ${DIFF_LIMIT} characters; the whole work is in ${cell.folder}.]`;
 }
 
+/** The set's kept results, read one after another as each file holds every cell's patch; a file that isn't JSON or has no cells is skipped. */
+async function keptResults(folder: string): Promise<ResultsFile[]> {
+  const runs = join(folder, "runs");
+  if (!existsSync(runs)) return [];
+  const names = (await readdir(runs)).filter((name) => name.endsWith(".json")).sort();
+  const results: ResultsFile[] = [];
+  for (const name of names) {
+    try {
+      const parsed: unknown = JSON.parse(await readFile(join(runs, name), "utf8"));
+      if (typeof parsed === "object" && parsed !== null && Array.isArray((parsed as ResultsFile).cells)) results.push(parsed as ResultsFile);
+    } catch {}
+  }
+  return results;
+}
+
 export async function benchAction(item: PluginItem<BenchRun>, action: unknown, context: CanvasActionContext) {
   runCaptains.set(context.conversationId, context);
   const asked = action as BenchPageAction;
@@ -570,6 +586,7 @@ export async function benchAction(item: PluginItem<BenchRun>, action: unknown, c
     return { resuming: true };
   }
   if (asked.kind === "diff") return { diff: await cellWork(context.storage, item.data.id, asked.cell) };
+  if (asked.kind === "leaderboard") return leaderboardOf(await keptResults(item.data.set.folder));
   throw new Error("A run's page starts and stops its run and shows a racer's changes.");
 }
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import host from "../host.ts";
 import { BENCH_ITEM_TYPE } from "../bench-host.ts";
-import { resultsFileOf, retryPrompt, runSummary, type BenchRun } from "../bench.ts";
+import { resultsFileOf, retryPrompt, runSummary, type BenchRun, type LeaderboardRow } from "../bench.ts";
 import { DIFF_LIMIT } from "../race.ts";
 import { fakeMirador, finished, git, PROFILES, until } from "./fake-mirador.ts";
 
@@ -715,4 +715,34 @@ test("the bench tool and the form's start keep deleteRacers", async () => {
   await direct.call(direct.captain, "bench", { columns: [{ profile: "Kimi" }], deleteRacers: true });
   expect(direct.page().deleteRacers).toBe(true);
   await until(() => direct.started.length === 1, "the racer started");
+});
+
+test("the leaderboard action reads the set's results files, skipping strays, on a setup form too", async () => {
+  await makeSet(repo, ["answer"]);
+  const runs = join(repo, "runs");
+  mkdirSync(runs, { recursive: true });
+  const resultsFile = (id: string, startedAt: number, result: string) => ({
+    run: id,
+    set: "Tiny",
+    commit: null,
+    startedAt,
+    endedAt: startedAt + 1,
+    settings: {},
+    columns: [{ profile: "Kimi", model: null, effort: null, ranOn: null }],
+    cells: [{ problem: "answer", column: 0, attempt: 1, result, seconds: 40, tries: [], usage: null, note: null, patch: null }],
+    totals: [],
+  });
+  writeFileSync(join(runs, "2026-11-13-aaaaaa.json"), JSON.stringify(resultsFile("aaaaaa", 1_000, "passed")));
+  writeFileSync(join(runs, "2026-11-13-bbbbbb.json"), JSON.stringify(resultsFile("bbbbbb", 2_000, "failed")));
+  writeFileSync(join(runs, "stray.json"), "not json");
+  writeFileSync(join(runs, "nocells.json"), JSON.stringify({ run: "cccccc" }));
+  writeFileSync(join(runs, "notes.txt"), "a stray note");
+  const mirador = miradorOf({ caller: "agent" });
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  expect(mirador.page().phase).toBe("setup");
+
+  const rows = (await mirador.act({ kind: "leaderboard" })) as LeaderboardRow[];
+
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ label: "Kimi", runs: 2, passed: 0, done: 1, passRate: 0, change: -1, sameProblems: true });
 });
