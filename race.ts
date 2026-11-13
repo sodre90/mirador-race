@@ -55,9 +55,9 @@ export interface Standing {
 }
 
 /**
- * setup: the form the user fills in. racing: the racers work. voting: they rank each other's work. picking: it waits for
- * the user to pick the work on its page. deciding: the conversation that started the race picks, or takes what the user
- * picked. stopped: the user stopped it.
+ * setup: the form, which the agent may have filled in, waits for the user's Start. racing: the racers work. voting: they
+ * rank each other's work. picking: it waits for the user to pick the work on its page. deciding: the conversation that
+ * started the race picks, or takes what the user picked. stopped: the user stopped it.
  */
 export type Phase = "setup" | "racing" | "voting" | "picking" | "deciding" | "stopped";
 
@@ -69,12 +69,6 @@ export interface Race {
   check: string | null;
   decide: Decide;
   phase: Phase;
-  /**
-   * The user started it, from its form or the slash menu: it waits for their pick rather than the captain's, and Race
-   * runs its check, which the user typed. The agent's check runs only in the agents' own shells, where Mirador's
-   * permissions ask.
-   */
-  startedByUser: boolean;
   /** How many racers it starts. */
   size: number;
   racers: Racer[];
@@ -151,7 +145,6 @@ export function blankRace(request: Partial<RaceRequest>): Race {
     check: request.check ?? null,
     decide: request.decide ?? "captain",
     phase: "setup",
-    startedByUser: true,
     size,
     racers: [],
     board: [],
@@ -165,12 +158,8 @@ export function blankRace(request: Partial<RaceRequest>): Race {
   };
 }
 
-/** Race runs the race's check itself only when the user typed it. */
-export const raceChecks = (race: Pick<Race, "check" | "startedByUser">) => race.check !== null && race.startedByUser;
-
-export function racerPrompt(race: Pick<Race, "id" | "task" | "check" | "startedByUser">, number: number, of: number) {
-  const alsoByRace = raceChecks(race) ? "; Race runs it there too once you finish" : "";
-  const check = race.check ? `\n- Before you finish, run \`${race.check}\` in your folder and make it pass${alsoByRace}.` : "";
+export function racerPrompt(race: Pick<Race, "id" | "task" | "check">, number: number, of: number) {
+  const check = race.check ? `\n- Before you finish, run \`${race.check}\` in your folder and make it pass; Race runs it there too once you finish.` : "";
   return `${race.task}
 
 ---
@@ -199,7 +188,7 @@ export function checkWords(result: CheckResult) {
 
 export function votePrompt(race: Race, voter: number) {
   const others = race.racers.filter(({ number, state }) => number !== voter && state === "finished");
-  const checked = raceChecks(race)
+  const checked = race.check
     ? `\nRace ran \`${race.check}\` in each folder:\n${others.map(({ number, check }) => `- racer ${number}: ${check ? checkWords(check) : "not run"}`).join("\n")}\n`
     : "";
   return `All racers of race ${race.id} have finished. Vote on the others' work: read each with race_peek (racers ${others.map(({ number }) => number).join(", ")}).${checked}
@@ -297,10 +286,10 @@ const checkName = (race: Race) => (race.check ? `\`${race.check}\`` : "the proje
 const howToTake = (race: Race) =>
   `commit a racer's work on its branch if it left some uncommitted, then \`git merge --squash <branch>\` or \`git cherry-pick\`, or copy the parts you want. Run ${checkName(race)} again on the result`;
 
-/** What the conversation that started the race hears once it's over and the pick is its own. */
+/** What the conversation that started the race hears when the user lets it pick the work. */
 export function decidePrompt(race: Race) {
   if (nobodyFinished(race)) return nobodyFinishedPrompt(race);
-  const firstStep = raceChecks(race) ? `Race ran ${checkName(race)} in each finished racer's folder; what it said is above.` : `Run ${checkName(race)} in each finished racer's folder.`;
+  const firstStep = race.check ? `Race ran ${checkName(race)} in each finished racer's folder; what it said is above.` : `Run ${checkName(race)} in each finished racer's folder.`;
   return `${results(race)}
 
 Now decide:

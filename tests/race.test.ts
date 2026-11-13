@@ -37,7 +37,7 @@ const PROFILES = [
 ];
 
 /** Mirador as the plugin sees it: one storage, the items of each conversation, and conversations started in real worktrees of the repo. */
-function fakeMirador({ refuseRacer, caller = "agent" }: { refuseRacer?: number; caller?: "agent" | "user" } = {}) {
+function fakeMirador({ refuseRacer, caller = "user" }: { refuseRacer?: number; caller?: "agent" | "user" } = {}) {
   const kept = new Map<string, string>();
   const storage: CanvasPluginStorage = {
     get: (key) => (kept.has(key) ? JSON.parse(kept.get(key)!) : undefined),
@@ -112,15 +112,15 @@ test("a race starts its racers on one profile, each in a worktree of its own wit
   expect(new Set(mirador.started.map(({ folder }) => folder)).size).toBe(3);
   expect(mirador.started[1]!.prompt).toContain("You are racer 2 of 3");
   expect(mirador.started[1]!.prompt).toContain("Make answer 42");
-  expect(mirador.started[1]!.prompt).toContain("run `bun test` in your folder and make it pass.\n");
+  expect(mirador.started[1]!.prompt).toContain("run `bun test` in your folder and make it pass; Race runs it there too once you finish.\n");
   expect(mirador.started[0]!.title).toMatch(/^Race [0-9a-f]{6} · racer 1$/);
   const race = mirador.page();
-  expect(race).toMatchObject({ task: "Make answer 42", profiles: ["qwen flash"], size: 3, phase: "racing", decide: "captain", check: "bun test", startedByUser: false });
+  expect(race).toMatchObject({ task: "Make answer 42", profiles: ["qwen flash"], size: 3, phase: "racing", decide: "captain", check: "bun test" });
   expect(race.racers.map(({ number, branch, state, profile }) => ({ number, branch, state, profile }))).toEqual(
     mirador.started.map(({ branch }, index) => ({ number: index + 1, branch, state: "starting", profile: "Qwen Flash" })),
   );
   expect(answer).toContain(`Race ${race.id} started: 3 racers, each in a worktree of its own (racer 1 on Qwen Flash, branch ${mirador.started[0]!.branch};`);
-  expect(answer).toContain("you hear it as your next message");
+  expect(answer).toContain("When all have finished, you pick the work to take on the race page.");
 });
 
 test("a workspace that can't give the first racer a worktree starts no race and says why", async () => {
@@ -199,9 +199,9 @@ test("only a race's racers and captain use its board", async () => {
   await expect(mirador.call(mirador.contextOf("stranger"), "race_board", { post: "hi" })).rejects.toThrow("Only a race's racers");
 });
 
-test("once every racer's work ended, the captain hears each one's branch, folder, changes and words, and to run the agent's check, which Race doesn't run itself", async () => {
+test("once every racer's work ended, the captain hears each one's branch, folder, changes and words, and to wait for the user's pick", async () => {
   const mirador = fakeMirador();
-  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 3, check: "touch ran-by-race" });
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 3 });
   writeFileSync(join(mirador.started[0]!.folder, "app.ts"), "export const answer = 42;\n");
 
   await mirador.replied(1, finished("Changed app.ts; the check passes."));
@@ -216,20 +216,19 @@ test("once every racer's work ended, the captain hears each one's branch, folder
   expect(told?.text).toContain(`- Racer 1 (Qwen Flash): finished · branch ${mirador.started[0]!.branch} · folder ${mirador.started[0]!.folder} · 1 file, +1 −1\n`);
   expect(told?.text).toContain("It said: Changed app.ts; the check passes.");
   expect(told?.text).toContain("- Racer 2 (Qwen Flash): failed");
-  expect(told?.text).toContain("1. Run `touch ran-by-race` in each finished racer's folder.");
   expect(told?.text).toContain(race.base!);
-  expect(race.phase).toBe("deciding");
+  expect(told?.text).toContain(`answer in one line that race ${race.id} is over and waits for their pick.`);
+  expect(race.phase).toBe("picking");
   expect(race.racers.map(({ check, state }) => ({ check, state }))).toEqual([
     { check: null, state: "finished" },
     { check: null, state: "failed" },
     { check: null, state: "finished" },
   ]);
-  expect(mirador.started.some(({ folder }) => existsSync(join(folder, "ran-by-race"))), "the agent's check runs only where Mirador's permissions ask").toBe(false);
   expect(race.racers.map(({ endedAt }) => endedAt !== null)).toEqual([true, true, true]);
 });
 
-test("Race runs the check the user typed in each racer's folder once it finished, and the captain hears what it said with the results", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+test("Race runs the race's check in each racer's folder once it finished, and the captain hears what it said with the results", async () => {
+  const mirador = fakeMirador();
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 3, check: "grep 42 app.ts || { echo 'no 42 here'; exit 3; }" });
   expect(mirador.started[0]!.prompt).toContain("and make it pass; Race runs it there too once you finish.");
   writeFileSync(join(mirador.started[0]!.folder, "app.ts"), "export const answer = 42;\n");
@@ -279,7 +278,7 @@ test("with a vote, the finished racers rank each other's work first, and the cap
   ]);
   expect(told?.text).toContain("The racers voted: racer 3: 2 points, ranked first by racers 1, 2; racer 1: 1 point, ranked first by racer 3; racer 2: 0 points.");
   expect(told?.text).toContain("- Racer 1 ranked 3 first, then 2: 3 has a test");
-  expect(mirador.page().phase).toBe("deciding");
+  expect(mirador.page().phase).toBe("picking");
 });
 
 test("a racer whose vote turn ends without a vote abstains, and the vote ends without it", async () => {
@@ -299,13 +298,13 @@ test("a racer whose vote turn ends without a vote abstains, and the vote ends wi
   expect(mirador.promptsTo(mirador.captain.conversationId)[0]?.text).toContain("The racers voted:");
 });
 
-test("a vote no racer can be asked for leaves the pick to the captain", async () => {
+test("a vote no racer can be asked for goes straight to the user's pick", async () => {
   const mirador = fakeMirador();
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, decide: "vote" });
 
   for (const number of [1, 2]) await mirador.replied(number, finished("done"));
 
-  expect(mirador.page().phase).toBe("deciding");
+  expect(mirador.page().phase).toBe("picking");
   expect(mirador.promptsTo(mirador.captain.conversationId)[0]?.text).not.toContain("The racers voted");
 });
 
@@ -367,22 +366,49 @@ test("racers can run on a profile each, which repeat in turn when there are more
   expect(mirador.started.slice(3).map(({ profile }) => profile), "one racer per profile when several are named").toEqual(["Kimi", "Qwen Flash"]);
 });
 
-test("the agent must name the task and a profile, while the user's /race:race without them gets a form, filled in with what they said", async () => {
-  await expect(fakeMirador().call(fakeMirador().captain, "race", {})).rejects.toThrow("Say what the racers should do: the task.");
-  await expect(fakeMirador().call(fakeMirador().captain, "race", { task: "Make answer 42" })).rejects.toThrow("Name the profile the racers run on");
-  const mirador = fakeMirador({ caller: "user" });
+test("the agent's race only drafts its form, filled in with what it asked, and nothing runs until the user presses Start race", async () => {
+  const mirador = fakeMirador({ caller: "agent" });
+
+  const answer = await mirador.call(mirador.captain, "race", { task: "Make answer 42", profiles: ["kimi", "Qwen Flash"], check: "true", decide: "vote" });
+
+  expect(answer).toContain("Nothing runs until the user checks it and presses Start race");
+  expect(mirador.started).toEqual([]);
+  expect(mirador.raceItem().title).toBe("New race");
+  expect(mirador.page()).toMatchObject({ phase: "setup", task: "Make answer 42", profiles: ["kimi", "Qwen Flash"], size: 2, check: "true", decide: "vote", racers: [] });
+
+  expect(await mirador.act({ kind: "start", task: "Make answer 42", profiles: ["Kimi", "Qwen Flash"], check: "true", decide: "vote" })).toEqual({ started: mirador.page().id });
+  expect(mirador.started.map(({ profile }) => profile)).toEqual(["Kimi", "Qwen Flash"]);
+  expect(mirador.page()).toMatchObject({ phase: "racing", check: "true", decide: "vote" });
+});
+
+test("the agent's draft needs the task, and names only profiles Mirador has, or none for the user to choose", async () => {
+  const mirador = fakeMirador({ caller: "agent" });
+
+  await expect(mirador.call(mirador.captain, "race", { profile: "Kimi" })).rejects.toThrow("Say what the racers should do: the task.");
+  await expect(mirador.call(mirador.captain, "race", { task: "Make answer 42", profiles: ["Kimi", "Opus"] })).rejects.toThrow(
+    "There is no profile named Opus. The profiles are: Qwen Flash, Kimi; or leave profiles out for the user to choose.",
+  );
+  expect(mirador.items).toEqual([]);
+
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42" });
+  expect(mirador.page()).toMatchObject({ phase: "setup", task: "Make answer 42", profiles: [], size: 4 });
+  expect(mirador.started).toEqual([]);
+});
+
+test("the user's /race:race without a task or a profile gets a form, filled in with what they said", async () => {
+  const mirador = fakeMirador();
 
   const answer = await mirador.call(mirador.captain, "race", { check: "bun test" });
 
   expect(answer).toBe("Fill in the race on the canvas, then press Start race.");
   expect(mirador.started).toEqual([]);
   expect(mirador.raceItem().title).toBe("New race");
-  expect(mirador.page()).toMatchObject({ phase: "setup", task: "", profiles: [], check: "bun test", size: 4, racers: [], startedByUser: true });
+  expect(mirador.page()).toMatchObject({ phase: "setup", task: "", profiles: [], check: "bun test", size: 4, racers: [] });
   expect(await mirador.act({ kind: "profiles" })).toEqual(PROFILES);
 });
 
 test("the form starts its race on its own page, waiting for the user's pick, and only once", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+  const mirador = fakeMirador();
   await mirador.call(mirador.captain, "race", {});
   const formId = mirador.page().id;
 
@@ -391,7 +417,7 @@ test("the form starts its race on its own page, waiting for the user's pick, and
 
   expect(mirador.items).toHaveLength(1);
   expect(mirador.raceItem().title).toBe("Race · Make answer 42");
-  expect(mirador.page()).toMatchObject({ id: formId, phase: "racing", startedByUser: true, size: 2, check: "true" });
+  expect(mirador.page()).toMatchObject({ id: formId, phase: "racing", size: 2, check: "true" });
   expect(mirador.started.map(({ profile, title }) => ({ profile, title }))).toEqual([
     { profile: "Kimi", title: `Race ${formId} · racer 1` },
     { profile: "Qwen Flash", title: `Race ${formId} · racer 2` },
@@ -400,7 +426,7 @@ test("the form starts its race on its own page, waiting for the user's pick, and
 });
 
 test("a race the user started waits for their pick: the captain hears the results and to wait, and the pick goes to it as their message", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+  const mirador = fakeMirador();
   const answer = await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 3 });
   expect(answer).toContain("When all have finished, you pick the work to take on the race page.");
   await expect(mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } })).rejects.toThrow("isn't waiting for a pick");
@@ -430,7 +456,7 @@ test("a race the user started waits for their pick: the captain hears the result
 });
 
 test("a pick whose message never went leaves the race waiting for the user's pick", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+  const mirador = fakeMirador();
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
   for (const number of [1, 2]) await mirador.replied(number, finished("done"));
 
@@ -442,7 +468,7 @@ test("a pick whose message never went leaves the race waiting for the user's pic
 });
 
 test("combining racers asks the captain for the parts the user wants, and letting it pick hands it the decision", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+  const mirador = fakeMirador();
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
   for (const number of [1, 2]) await mirador.replied(number, finished("done"));
 
@@ -453,7 +479,7 @@ test("combining racers asks the captain for the parts the user wants, and lettin
   await mirador.act({ kind: "picked", pick: { kind: "combine", racers: [1, 2], how: "Racer 1's parser, racer 2's tests" } });
   expect(mirador.page().picked).toBe("You asked to combine racers 1, 2");
 
-  const other = fakeMirador({ caller: "user" });
+  const other = fakeMirador();
   await other.call(other.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
   for (const number of [1, 2]) await other.replied(number, finished("done"));
   const { message: decide } = (await other.act({ kind: "pick", pick: { kind: "captain" } })) as { message: string };
@@ -476,7 +502,7 @@ test("two racers that each rank the other first make a tie, said as one, and eac
 });
 
 test("voters hear what Race's check said in the others' folders, rather than run it", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+  const mirador = fakeMirador();
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, decide: "vote", check: "exit 1" });
   for (const number of [1, 2]) await mirador.call(mirador.racer(number), "race_board", {});
   for (const number of [1, 2]) await mirador.replied(number, finished("done"));
@@ -487,7 +513,7 @@ test("voters hear what Race's check said in the others' folders, rather than run
 });
 
 test("a racer shows as checking while Race runs the check, and Stop race kills the check, which then tells nobody", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+  const mirador = fakeMirador();
   const childPid = join(scratch, "child-pid");
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, check: `sleep 30 & echo $! > ${childPid}; wait` });
 
@@ -594,7 +620,7 @@ test("a check left running by a restart is ended, with its group, but not a proc
 });
 
 test("a racer whose check a restart cut short is checked again once its race's page shows, after what's left of the old check ends", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+  const mirador = fakeMirador();
   const runs = join(scratch, "runs");
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, check: `echo ran >> ${runs}; grep 42 app.ts` });
   writeFileSync(join(mirador.started[1]!.folder, "app.ts"), "export const answer = 42;\n");
@@ -619,7 +645,7 @@ test("a racer whose check a restart cut short is checked again once its race's p
 });
 
 test("a race whose racers had all ended when Mirador restarted, before it moved on, moves on to the pick once its page shows", async () => {
-  const mirador = fakeMirador({ caller: "user" });
+  const mirador = fakeMirador();
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
   await mirador.replied(1, finished("done"));
   const id = mirador.page().id;

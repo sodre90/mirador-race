@@ -59,7 +59,7 @@ async function racerConversations(page: Page, captainId: string, raceId: string)
 
 let captainId = "";
 
-test("a race starts its racers in worktrees of their own, shows each in a lane, and tells the captain their branches and folders and to run the check", async ({ page }) => {
+test("the agent's race waits as a filled-in form for the user's Start, then starts its racers in worktrees of their own, each in a lane, and the captain hears where they worked and waits for the user's pick", async ({ page }) => {
   await helpers().signIn(page, host);
   await helpers().addWorkspace(page, host.projectDir);
   const profiles = await helpers().createProfile(page, profileName, "", "", "opencode");
@@ -68,11 +68,24 @@ test("a race starts its racers in worktrees of their own, shows each in a lane, 
   captainId = await startConversationWithoutModel(page);
   await sendAndWait(page, "Start");
 
-  const started = await helpers().callCanvasTool(host, captainId, "race", { task: "FOLDER", profile: profileName, racers: 2, check: 'echo "checked in $PWD"' });
-  expect(started).toMatch(/^Race \w+ started: 2 racers, each in a worktree of its own \(racer 1 on racer, branch mirador\/\S+; racer 2 on racer, branch mirador\/\S+\)\./);
-  const raceId = started.match(/^Race (\w+) started/)![1]!;
+  const drafted = await helpers().callCanvasTool(host, captainId, "race", { task: "FOLDER", profile: profileName, racers: 2, check: 'echo "checked in $PWD"' });
+  expect(drafted).toContain("Nothing runs until the user checks it and presses Start race");
   const view = helpers().walkthroughView(page);
   const lane = (number: number) => view.locator(`.lane[data-racer="${number}"]`);
+
+  await test.step("the form shows what the agent asked for, and no racer starts until the user presses Start race", async () => {
+    await expect(view.getByRole("heading", { name: "New race" })).toBeVisible();
+    await expect(view.getByLabel("Task")).toHaveValue("FOLDER");
+    await expect(view.getByLabel("Check")).toHaveValue('echo "checked in $PWD"');
+    for (const number of [1, 2]) await expect(view.getByLabel(`Racer ${number}'s profile`)).toHaveValue(profileName);
+    await expect(view.getByLabel("Racer 3's profile")).toHaveCount(0);
+    expect(raceBranches()).toEqual([]);
+    await helpers().untilFramePainted(page, raceFrame(page));
+    await view.getByRole("button", { name: "Start race" }).click();
+  });
+  const heading = view.getByRole("heading", { name: /^Race \w+$/ });
+  await expect(heading).toBeVisible();
+  const raceId = (await heading.textContent())!.replace("Race ", "");
 
   await test.step("the racers show folded under the captain, and the race page gives each a lane on a branch of its own", async () => {
     await expect(page.locator(`.sidebar li[data-reorder-id="${captainId}"]`).getByRole("button", { name: "2 delegated" })).toBeVisible();
@@ -87,8 +100,8 @@ test("a race starts its racers in worktrees of their own, shows each in a lane, 
   });
 
   let decided = "";
-  await test.step("once both finished, the captain hears where each worked, and to run the agent's check itself, through its permissions", async () => {
-    await expect.poll(agentSaw).toContain(`Race ${raceId} is over: 2 of 2 racers finished.`);
+  await test.step("once both finished, Race runs the check in each one's folder, and the captain hears where each worked and waits for the user's pick", async () => {
+    await expect.poll(agentSaw).toContain(`answer in one line that race ${raceId} is over and waits for their pick.`);
     expect(agentSaw()).toContain(`FOLDER\n\n---\nYou are racer 1 of 2 in race ${raceId}`);
     expect(agentSaw()).toContain(`FOLDER\n\n---\nYou are racer 2 of 2 in race ${raceId}`);
     decided = agentSaw().slice(agentSaw().indexOf(`Race ${raceId} is over`));
@@ -97,11 +110,11 @@ test("a race starts its racers in worktrees of their own, shows each in a lane, 
     expect(new Set(workedIn).size, "each racer worked in a folder of its own").toBe(2);
     expect(toldOf.toSorted(), "the captain hears the folders the racers worked in").toEqual(workedIn.toSorted());
     for (const branch of raceBranches()) expect(decided).toContain(`branch ${branch} ·`);
-    expect(decided).toContain("1. Run `echo \"checked in $PWD\"` in each finished racer's folder.");
-    await expect(view.getByText("Over: the conversation that started it is taking the work", { exact: false })).toBeVisible();
+    expect(decided).toMatch(/- Racer 1 \(racer\): finished · .* · check passed in [\d.]+ s/);
+    await expect(view.getByText("Over: pick the work to take", { exact: false })).toBeVisible();
     await expect(view.locator(".lane .state-finished")).toHaveCount(2);
-    await expect(view.getByRole("button", { name: "Take this" }), "the agent started this race, so it picks").toHaveCount(0);
-    await expect(view.locator(".lane .check"), "Race runs only a check the user typed").toHaveCount(0);
+    await expect(view.getByRole("table", { name: "Results" }).getByRole("button", { name: "Take this" })).toHaveCount(2);
+    await expect(view.locator(".lane .check")).toHaveCount(2);
     await helpers().untilFramePainted(page, raceFrame(page));
   });
 
@@ -149,11 +162,13 @@ test("a race starts its racers in worktrees of their own, shows each in a lane, 
   });
 });
 
-test("Stop race on the race page stops the racers still working, and the captain isn't asked to decide", async ({ page }) => {
+test("Stop race on the race page stops the racers still working, and the captain hears nothing of the race", async ({ page }) => {
   await helpers().signIn(page, host);
   await page.goto(`${host.origin}/#/c/${captainId}`);
-  const started = await helpers().callCanvasTool(host, captainId, "race", { task: "STOPPED QUIET until the race is stopped", profile: profileName, racers: 2 });
-  const raceId = started.match(/^Race (\w+) started/)![1]!;
+  const composer = page.locator(".composer:visible textarea");
+  await composer.fill(`/race:race task="STOPPED QUIET until the race is stopped" profile=${profileName} racers=2`);
+  await composer.press("Enter");
+  const raceId = (await page.locator(".plugin-command-reply:visible").textContent())!.match(/Race (\w+) started/)![1]!;
   const view = helpers().walkthroughView(page);
   await expect(view.getByRole("heading", { name: `Race ${raceId}` })).toBeVisible();
   await expect(view.locator(".lane .state-working")).toHaveCount(2);

@@ -12,14 +12,12 @@ import {
   boardAnswer,
   conversationWorks,
   cut,
-  decidePrompt,
   isWorking,
   newRaceId,
   pickMessage,
   pickWords,
   pickingPrompt,
   profileOf,
-  raceChecks,
   raceRequest,
   raceTitle,
   racerPrompt,
@@ -130,7 +128,7 @@ function membership(storage: CanvasPluginStorage, conversationId: string): { kep
   return led ? { kept: led, number: CAPTAIN } : null;
 }
 
-const notAMember = () => new Error("Only a race's racers and the conversation that started it use the race tools; start a race with the race tool.");
+const notAMember = () => new Error("Only a race's racers and the conversation that started it use the race tools; a race starts from its form on the canvas.");
 
 /** What every racer changed since the race's base, at most every few seconds per race unless `now`. */
 async function refreshChanges(storage: CanvasPluginStorage, id: string, { now = false } = {}) {
@@ -172,8 +170,8 @@ async function racerWork(storage: CanvasPluginStorage, id: string, number: numbe
   return diff.length <= DIFF_LIMIT ? diff : `${diff.slice(0, DIFF_LIMIT)}\n\n[Cut at ${DIFF_LIMIT} characters; the whole work is in ${racer.folder}.]`;
 }
 
-function newRace(request: RaceRequest, { id = newRaceId(), startedByUser }: { id?: string; startedByUser: boolean }): Race {
-  return { ...blankRace(request), ...request, id, startedByUser, phase: "racing", startedAt: Date.now() };
+function newRace(request: RaceRequest, id = newRaceId()): Race {
+  return { ...blankRace(request), ...request, id, phase: "racing", startedAt: Date.now() };
 }
 
 function startedRacer(number: number, started: StartedConversation): Racer {
@@ -227,7 +225,7 @@ async function startFromForm(form: { id: string; data: Race }, asked: RaceInput,
   if (typeof request === "string") throw new Error(request);
   startingForms.add(form.data.id);
   try {
-    const race = await startRace(newRace(request, { id: form.data.id, startedByUser: true }), context, (race) => {
+    const race = await startRace(newRace(request, form.data.id), context, (race) => {
       context.change(form.id, { title: raceTitle(race.task), data: race });
       return form.id;
     });
@@ -254,11 +252,11 @@ async function afterTheRace(storage: CanvasPluginStorage, id: string) {
   }
 }
 
-/** The captain hears how the race ended: to pick the best work, or, when the user picks, to wait for their pick. */
+/** The captain hears how the race ended, and to wait for the user's pick. */
 async function raceOver(storage: CanvasPluginStorage, id: string) {
   const kept = update(storage, id, (race) => {
     if (race.votes.length > 0) race.standings = tally(race);
-    race.phase = race.startedByUser ? "picking" : "deciding";
+    race.phase = "picking";
   });
   if (!kept) return;
   const captain = captains.get(kept.captain);
@@ -266,7 +264,7 @@ async function raceOver(storage: CanvasPluginStorage, id: string) {
     console.error(`race ${id} is over, but Mirador was restarted since it started and can't tell the conversation that started it.`);
     return;
   }
-  await captain.prompt(kept.race.startedByUser ? pickingPrompt(kept.race) : decidePrompt(kept.race), { afterTurn: true });
+  await captain.prompt(pickingPrompt(kept.race), { afterTurn: true });
 }
 
 /** Every voter voted, or ended its turn without: the race is over, with the standings. */
@@ -285,7 +283,7 @@ function racerEnded(storage: CanvasPluginStorage, conversationId: string, reply:
   update(storage, racer.race, (race) => {
     const ended = race.racers.find(({ number }) => number === racer.number);
     if (!ended) return;
-    const checks = reply.ended === "finished" && raceChecks(race) && race.phase === "racing";
+    const checks = reply.ended === "finished" && race.check !== null && race.phase === "racing";
     ended.state = checks ? "checking" : reply.ended;
     ended.said = reply.text === null ? null : cut(reply.text.trim(), SAID_LIMIT);
     ended.endedAt = Date.now();
@@ -382,7 +380,29 @@ function picked(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
 }
 
 const raceDescription =
-  "Race a task: start several conversations at once, e.g. four of a small model, or one on each of several profiles to compare them, each in a git worktree and branch of its own, working on the same task and sharing a board where they post what they learn. Returns at once; when all have finished you hear it as your next message, with their branches and folders, to run the check in each, pick or combine the best work and merge it. With decide: vote, the racers rank each other's work first. Racers branch from the last commit, so commit what they need first; the workspace's worktree setup command, such as installing dependencies, runs in each racer's folder before it starts.";
+  "Draft a race for the user to start: several conversations at once, e.g. four of a small model, or one on each of several profiles to compare them, each in a git worktree and branch of its own, working on the same task and sharing a board where they post what they learn. This puts the race's form on the canvas, filled in with what you pass; nothing runs until the user checks it and presses Start race, so leave out profiles you aren't sure they want. When all racers have finished you hear their results as your next message; the user picks the work to take on the race page, or hands the pick to you. With decide: vote, the racers rank each other's work first. Racers branch from the last commit, so commit what they need first; the workspace's worktree setup command, such as installing dependencies, runs in each racer's folder before it starts.";
+
+const DRAFTED =
+  "The race's form is on the canvas, filled in with what you asked. Nothing runs until the user checks it and presses Start race: tell them it waits for them. When all racers have finished you hear their results, and the user picks the work to take on the race page.";
+
+/** The race's form on the canvas, filled in with what was asked, for the user to finish and start. */
+function publishForm(asked: RaceInput, context: CanvasToolContext<Race>) {
+  const profiles = asked.profiles ?? (asked.profile ? [asked.profile] : undefined);
+  context.publish({
+    type: ITEM_TYPE,
+    title: "New race",
+    data: blankRace({ task: asked.task?.trim(), profiles, size: asked.racers, check: asked.check?.trim() || null, decide: asked.decide }),
+  });
+}
+
+/** What's wrong with the agent's draft that the form can't show: a missing task, or a profile Mirador doesn't have. */
+function draftProblem(asked: RaceInput, context: CanvasToolContext<Race>) {
+  if (!asked.task?.trim()) return "Say what the racers should do: the task.";
+  const known = context.profiles().map(({ name }) => name.toLowerCase());
+  const unknown = [...(asked.profiles ?? []), ...(asked.profile ? [asked.profile] : [])].filter((name) => !known.includes(name.trim().toLowerCase()));
+  if (unknown.length === 0) return null;
+  return `There is no profile named ${unknown.join(", ")}. The profiles are: ${context.profiles().map(({ name }) => name).join(", ")}; or leave profiles out for the user to choose.`;
+}
 
 const host: CanvasHost<Race> = {
   items: {
@@ -406,7 +426,7 @@ const host: CanvasHost<Race> = {
         type: "object",
         properties: {
           task: { type: "string", minLength: 1, description: "Everything the racers need: what to do, which files or commands, and how to tell it works. They see nothing of this conversation." },
-          profile: { type: "string", minLength: 1, description: "The Mirador profile every racer runs on, by name." },
+          profile: { type: "string", minLength: 1, description: "The Mirador profile every racer runs on, by name; the user can change it on the form." },
           profiles: {
             type: "array",
             items: { type: "string", minLength: 1 },
@@ -418,30 +438,27 @@ const host: CanvasHost<Race> = {
           check: {
             type: "string",
             minLength: 1,
-            description: "A command that tells whether the work is right, e.g. the project's tests; each racer runs it before it finishes.",
+            description: "A command that tells whether the work is right, e.g. the project's tests; each racer runs it before it finishes, and Race runs it in each racer's folder once that racer is done.",
           },
-          decide: { type: "string", enum: ["captain", "vote"], description: "captain (the default): you pick once they finish. vote: the racers first rank each other's work, then you pick." },
+          decide: { type: "string", enum: ["captain", "vote"], description: "captain (the default): the pick comes as soon as they finish. vote: the racers first rank each other's work." },
         },
       },
       async run(input, context) {
         const asked = input as RaceInput;
+        if (context.caller === "agent") {
+          const problem = draftProblem(asked, context);
+          if (problem) throw new Error(problem);
+          publishForm(asked, context);
+          return DRAFTED;
+        }
         const request = raceRequest(asked);
         if (typeof request === "string") {
-          if (context.caller !== "user") throw new Error(request);
-          const profiles = asked.profiles ?? (asked.profile ? [asked.profile] : undefined);
-          context.publish({
-            type: ITEM_TYPE,
-            title: "New race",
-            data: blankRace({ task: asked.task?.trim(), profiles, size: asked.racers, check: asked.check?.trim() || null, decide: asked.decide }),
-          });
+          publishForm(asked, context);
           return "Fill in the race on the canvas, then press Start race.";
         }
-        const race = await startRace(newRace(request, { startedByUser: context.caller === "user" }), context, (race) => context.publish({ type: ITEM_TYPE, title: raceTitle(race.task), data: race }).id);
+        const race = await startRace(newRace(request), context, (race) => context.publish({ type: ITEM_TYPE, title: raceTitle(race.task), data: race }).id);
         const racers = race.racers.map(({ number, profile, branch }) => `racer ${number} on ${profile}, branch ${branch}`).join("; ");
-        const afterwards = race.startedByUser
-          ? "When all have finished, you pick the work to take on the race page."
-          : "When all have finished, you hear it as your next message; carry on with other work meanwhile, or end your turn.";
-        return `Race ${race.id} started: ${race.racers.length} racers, each in a worktree of its own (${racers}). They share a board you can read with race_board, and post to, to steer them. ${afterwards}`;
+        return `Race ${race.id} started: ${race.racers.length} racers, each in a worktree of its own (${racers}). They share a board you can read with race_board, and post to, to steer them. When all have finished, you pick the work to take on the race page.`;
       },
     },
     race_board: {
@@ -535,8 +552,8 @@ const host: CanvasHost<Race> = {
   },
   guidance: {
     instructions:
-      "- race: when the user asks to race a task, start several conversations, on one profile (e.g. four of a small model) or one on each of several profiles to compare them, each in a git worktree of its own, sharing a board where they post what they learn; when they finish you hear it, then run the check in each worktree, pick or combine the best work and merge it into your branch.",
-    often: "- race: when the user asks to race a task on several agents.",
+      "- race: when the user asks to race a task, draft the race: its form opens on the canvas, filled in with the task, the profiles (one for every racer, e.g. four of a small model, or one each to compare models; leave out any the user didn't name), the check and the vote, and the user starts it there. The racers work in git worktrees of their own, sharing a board; when they finish you hear their results, and the user picks the work to take or hands the pick to you.",
+    often: "- race: when the user asks to race a task on several agents; you draft it, the user starts it.",
   },
 };
 
