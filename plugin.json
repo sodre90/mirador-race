@@ -12,7 +12,8 @@
     { "path": "screenshots/race-form.png", "caption": "An agent's race arrives as a form for you to check, with its advice on how to check the work: the check, hidden tests and a judge" },
     { "path": "screenshots/race-under-way.png", "caption": "Each racer's lane: its profile, time, changes, latest note and check, with its changes inline" },
     { "path": "screenshots/pick-the-work.png", "caption": "Once they're done, pick the work to take, with each racer's check, the judge's score and the vote side by side" },
-    { "path": "screenshots/judge-scores.png", "caption": "The judge's scores, best first, each with why" }
+    { "path": "screenshots/judge-scores.png", "caption": "The judge's scores, best first, each with why" },
+    { "path": "screenshots/bench-run.png", "caption": "A benchmark run: each problem's result and time on each model, every model's totals, and the set's leaderboard" }
   ],
   "canvas": { "host": "host.ts", "view": "view.js" }
 }

@@ -33,7 +33,9 @@ Race also runs benchmarks: every problem of a set on each profile you choose, ea
 
 Run one with `/race:bench` in a conversation whose workspace is the set, or ask the agent to run a benchmark: its call fills in the run's form for you to check and start. You choose the columns, a profile each with a model and effort if you like, and every problem runs on each column, a few racers of one profile at a time.
 
-The run page lays the problems out against the columns: each cell shows its racer's result and time, opens its conversation and shows its changes, and each column totals the problems it solved, its median time and its tokens and cost.
+The run page lays the problems out against the columns: each cell shows its racer's result and time, opens its conversation and shows its changes, and each column totals the problems it solved, its median time and its tokens and cost. Below them, the set's leaderboard ranks the models that ran on it, each by its latest run, with its change in pass rate since its run before on the same problems.
+
+![A benchmark run of four problems on three models: each problem's result and time on each model, every model's totals, and the set's leaderboard below them](screenshots/bench-run.png)
 
 A racer whose check fails gets one more turn with what the check printed — the tests are right, fix the code — unless the set allows only one try; results show passes on try 1 and on try 2. A racer that works past the set's time limit is stopped and its cell timed out, and each check runs under the set's check time limit. A run carries on when its page loads after a Mirador restart.
 

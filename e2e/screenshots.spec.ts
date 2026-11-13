@@ -310,3 +310,108 @@ test("screenshots of a race", async ({ page }) => {
   await expect(judgeSection.locator(".note-card").first()).toContainText("Racer 3 · 9/10");
   await takeScreenshot(page, "judge-scores", page.locator(".canvas-panel:visible"), { from: judgeSection, downTo: judgeSection });
 });
+
+/** The set's problems, easiest first as the matrix lists them, each check passing when the racer's skill reaches its difficulty. */
+const benchProblems = [
+  { id: "csv-quoted-commas", difficulty: 1 },
+  { id: "paginate-first-page", difficulty: 2 },
+  { id: "parse-iso-dates", difficulty: 3 },
+  { id: "retry-backoff", difficulty: 4 },
+];
+const benchColumns = [
+  { profile: "qwen3-coder", skill: 4, usage: "18000 200000 0.04", paceMs: 2_000 },
+  { profile: "kimi-k2", skill: 3, usage: "25000 200000 0.06", paceMs: 6_000 },
+  { profile: "glm-4.6", skill: 2, usage: "9000 128000 0.02", paceMs: 11_000 },
+];
+const benchEnvironment = ({ skill, usage, paceMs }: { skill: number; usage: string; paceMs: number }) => `SKILL=${skill}\nUSAGE="${usage}"\nPACE_MS=${paceMs}`;
+const benchTask = 'WRITE [{"pause": "{{env:PACE_MS}}"}, {"edit": "{{folder}}/skill.txt", "content": "{{env:SKILL}}"}, {"usage": "{{env:USAGE}}"}]';
+
+function makeBenchmarkSet(folder: string) {
+  mkdirSync(folder, { recursive: true });
+  git(folder, "init", "-q", "--initial-branch=main");
+  git(folder, "config", "user.name", "The Owner");
+  git(folder, "config", "user.email", "owner@example.test");
+  for (const { id } of benchProblems) {
+    git(folder, "checkout", "-q", "--orphan", `start/${id}`);
+    writeFileSync(join(folder, "README.md"), `# ${id}\n`);
+    git(folder, "add", "-A");
+    git(folder, "commit", "-qm", `start ${id}`);
+  }
+  git(folder, "checkout", "-q", "--orphan", "main");
+  git(folder, "rm", "-rqf", ".");
+  writeProject(folder, {
+    "set.json": JSON.stringify({ name: "Orders benchmarks", tries: 1, checkTimeoutMinutes: 1 }),
+    ...Object.fromEntries(
+      benchProblems.flatMap(({ id, difficulty }) => [
+        [`problems/${id}/problem.json`, JSON.stringify({ start: `start/${id}`, check: `test "$(cat skill.txt)" -ge ${difficulty}` })],
+        [`problems/${id}/task.md`, benchTask],
+      ]),
+    ),
+  });
+  for (const { id } of benchProblems) mkdirSync(join(folder, "problems", id, "check"), { recursive: true });
+  git(folder, "add", "-A");
+  git(folder, "commit", "-qm", "set");
+}
+
+/** The race's profiles run the bench too, each with its own skill, usage and pace; one the race didn't make is created. */
+async function benchProfile(page: Page, name: string, environment: string) {
+  const profiles = await helpers().openProfiles(page);
+  const existing = profiles.locator(".profile-list li", { hasText: name });
+  if ((await existing.count()) > 0) await existing.click();
+  else {
+    await profiles.locator(".profile-list li", { hasText: "+ New profile" }).click();
+    await profiles.getByLabel("Profile name").fill(name);
+    await profiles.getByLabel("Profile agent").selectOption({ label: "opencode" });
+    await profiles.getByRole("button", { name: "Create profile" }).click();
+    await expect(profiles.locator(".profile-list li.selected")).toHaveText(`${name}opencode`);
+  }
+  await helpers().openProfileTab(profiles, "Launch");
+  const field = profiles.getByLabel("Environment", { exact: true });
+  const reveal = profiles.getByRole("button", { name: "Edit environment" });
+  await expect(field.or(reveal)).toBeVisible();
+  if (await reveal.isVisible()) await reveal.click();
+  await field.fill(environment);
+  await profiles.getByRole("button", { name: "Save" }).click();
+  await expect(profiles.locator(".saved")).toHaveText("Saved");
+  await profiles.getByRole("button", { name: "Close" }).click();
+}
+
+/** Drafts a run of every problem on each column, starts it, and waits until its results and the leaderboard show. */
+async function runTheBench(page: Page, captainId: string) {
+  await helpers().callCanvasTool(host, captainId, "bench", { columns: benchColumns.map(({ profile }) => ({ profile })) });
+  const view = helpers().walkthroughView(page);
+  await expect(view.getByRole("heading", { name: "New benchmark run" })).toBeVisible();
+  await helpers().untilFramePainted(page, page.locator(".canvas-panel:visible .canvas-body > .canvas-frame.plugin iframe"));
+  await view.getByRole("button", { name: "Start run" }).click();
+  await expect(view.getByRole("heading", { name: /^Bench run \w+$/ })).toBeVisible();
+  await expect(view.locator(".race-head .phase")).toHaveText("Done", { timeout: 120_000 });
+  await expect(view.getByRole("table", { name: "Leaderboard" }).locator("tbody tr")).toHaveCount(benchColumns.length, { timeout: 30_000 });
+  return view;
+}
+
+test("screenshots of a benchmark run", async ({ page }) => {
+  test.setTimeout(240_000);
+  const setFolder = join(host.root, "orders-benchmarks");
+  makeBenchmarkSet(setFolder);
+  await helpers().signIn(page, host);
+  for (const column of benchColumns) await benchProfile(page, column.profile, benchEnvironment(column));
+  await helpers().addWorkspaceFromSidebar(page, setFolder, `${benchColumns[0]!.profile} · opencode`);
+  const setCard = helpers().workspaceCard(page, setFolder);
+  const previousUrl = page.url();
+  await setCard.getByRole("button", { name: "+ New conversation" }).click();
+  await expect(page).not.toHaveURL(previousUrl);
+  const captainId = page.url().match(/#\/c\/(.+)$/)![1]!;
+
+  const firstRun = await runTheBench(page, captainId);
+  await expect(firstRun.getByRole("table", { name: "Results" }).locator("tfoot")).toContainText("4 of 4 · 100%");
+  await expect(page.locator(".chat-header:visible .badge")).toHaveText("idle", { timeout: 60_000 });
+
+  const improved = { ...benchColumns[2]!, skill: 3 };
+  await benchProfile(page, improved.profile, benchEnvironment(improved));
+  const view = await runTheBench(page, captainId);
+  await expect(view.getByRole("table", { name: "Leaderboard" }).locator("tbody tr", { hasText: improved.profile })).toContainText("+25 pts");
+  const medianTimes = await view.getByRole("table", { name: "Results" }).locator("tfoot tr", { hasText: "Median time" }).locator("td").allTextContents();
+  expect(new Set(medianTimes).size, "each column's pace shows in its median time").toBe(benchColumns.length);
+  await expect(view.locator(".confetti"), "a passing check's confetti falls on the page for a few seconds").toHaveCount(0, { timeout: 10_000 });
+  await takeScreenshot(page, "bench-run", page.locator(".canvas-panel:visible"), { downTo: view.getByRole("table", { name: "Leaderboard" }) });
+});
