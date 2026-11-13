@@ -15,11 +15,13 @@ A [Mirador](https://github.com/sodre90/mirador) plugin that races a task on seve
 - Once every racer has finished, been stopped or failed, the conversation that started the race hears it as its next message: each racer's profile, branch, folder, changes, check and last words, and the vote if there was one. It only says the race waits for your pick, and the page offers **Take this** for each racer, **Combine…** for the ones you tick, with how, and **Let the captain pick**, which go to it as your message.
 - The race page is a track: each racer runs on a lane of its own colour from the start, through its work and Race's check, to a checkered finish, with its profile, state and time, what it changed, its latest note and Race's check with its output, **Open** for its conversation and **Changes** for its work inline. A long task shows folded. Below are the board, each note beside its racer's colour, and the vote. Once it's over, a podium shows the racers whose work passed Race's check, or, in a race without a check, that the judge scored, best first: by the judge, then the vote, then the quicker. Only work that passed, or that the judge scored in a race without a check, earns a place, and a check that passes while you watch gets a burst of confetti.
 
-![The race form: the task, a profile for each racer, the check and the vote](screenshots/race-form.png)
+![An agent's race as a form for you to check: the task, a profile for each racer, the check, the vote and a judge, with the agent's advice on how to check the work](screenshots/race-form.png)
 
 ![Each racer's lane, one with its changes open](screenshots/race-under-way.png)
 
-![Picking the work to take: each racer's check and vote side by side](screenshots/pick-the-work.png)
+![Picking the work to take: each racer's check, the judge's score and the vote side by side](screenshots/pick-the-work.png)
+
+![The judge's scores, best first, each with why](screenshots/judge-scores.png)
 
 Racers branch from the workspace's last commit, so work the main checkout hasn't committed isn't in their folders. A new worktree has no installed dependencies either: set the workspace's **Setup command for a new worktree** under *Where conversations work*, such as `bun install`, so each racer's check can run.
 

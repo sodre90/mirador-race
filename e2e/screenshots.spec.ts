@@ -27,13 +27,18 @@ test.afterAll(async () => {
 
 const captainProfile = "main-model";
 const racerProfiles = ["qwen3-coder", "qwen3-coder", "kimi-k2", "glm-4.6"];
+const judgeProfile = "deepseek-r1";
+/** The judge's stand-in answers its prompt this late, so its scores, sent for it, come in while it still reads. */
+const JUDGE_ANSWERS_LATE = "FAKE_ACP_ANSWERS_AFTER_MS=600000";
+const advice =
+  "bun test tells right from wrong here, so the check settles most of it. A judge can weigh what the tests don't: whether a fix keeps paginate() right for its other callers, the orders API and the CSV export.";
 const task = "Page 1 of the orders list skips the first 20 orders, and the last page is always empty. Fix paginate() in src/paginate.ts so pages count from 1, and add tests for the first, the last and an empty list.";
 /** The stand-in agent works until it is stopped, then ends its turn as finished; the pictures show the task without this. */
 const WORKS_UNTIL_STOPPED = "FINISHED ON STOP ";
 const KEEPS_BUSY = "STOPPED QUIET until the screenshots are taken";
 const request = "Page 1 of the orders list skips the first 20 orders, and the last page is always empty. Where's the bug?";
 const captainsAnswer =
-  "In paginate() in src/paginate.ts: pages count from 1, but the offset is page * size, so page 1 starts at order 21, and pages has a stray + 1. Race it with /race:race if you'd like a few takes on the fix to pick from.";
+  "In paginate() in src/paginate.ts: pages count from 1, but the offset is page * size, so page 1 starts at order 21, and pages has a stray + 1. I've drafted a race of four takes on the fix on the canvas: check it and press Start race.";
 
 const BUGGY_PAGINATE = `export interface Page<T> {
   items: T[];
@@ -189,8 +194,8 @@ async function takeScreenshot(page: Page, name: string, area: Locator, { from, d
 test("screenshots of a race", async ({ page }) => {
   await helpers().signIn(page, host);
   await helpers().addWorkspace(page, host.projectDir);
-  for (const name of new Set([captainProfile, ...racerProfiles])) {
-    const profiles = await helpers().createProfile(page, name, "", "", "opencode");
+  for (const name of new Set([captainProfile, ...racerProfiles, judgeProfile])) {
+    const profiles = await helpers().createProfile(page, name, name === judgeProfile ? JUDGE_ANSWERS_LATE : "", "", "opencode");
     await profiles.getByRole("button", { name: "Close" }).click();
   }
   await page.getByLabel("Agent", { exact: true }).selectOption({ label: `${captainProfile} · opencode` });
@@ -198,17 +203,11 @@ test("screenshots of a race", async ({ page }) => {
   await helpers().sendMessage(page, `SAY ${captainsAnswer}`);
   await expect(page.locator(".chat-header:visible .badge")).toHaveText("idle", { timeout: 60_000 });
 
-  const composer = page.locator(".composer:visible textarea");
-  await composer.fill("/race:race");
-  await composer.press("Enter");
-  await composer.press("Enter");
+  await helpers().callCanvasTool(host, captainId, "race", { task, profiles: racerProfiles, check: "bun test", decide: "vote", judge: judgeProfile, advice });
   const view = helpers().walkthroughView(page);
   await expect(view.getByRole("heading", { name: "New race" })).toBeVisible();
+  await expect(view.getByLabel("Judge")).toHaveValue(judgeProfile);
   await helpers().untilFramePainted(page, page.locator(".canvas-panel:visible .canvas-body > .canvas-frame.plugin iframe"));
-  await view.getByLabel("Task").fill(task);
-  for (const [index, profile] of racerProfiles.entries()) await view.getByLabel(`Racer ${index + 1}'s profile`).selectOption(profile);
-  await view.getByLabel("Check", { exact: true }).fill("bun test");
-  await view.getByRole("checkbox", { name: "The racers rank each other's work before I pick" }).check();
   await page.mouse.move(0, 0);
   await takeScreenshot(page, "race-form", page.locator(".canvas-panel:visible"), { downTo: view.getByRole("button", { name: "Start race" }) });
 
@@ -218,7 +217,6 @@ test("screenshots of a race", async ({ page }) => {
   await expect(heading).toBeVisible();
   const raceId = (await heading.textContent())!.replace("Race ", "");
   await expect(view.locator(".lane .state-working")).toHaveCount(4, { timeout: 60_000 });
-  await page.locator(".plugin-command-reply:visible").getByRole("button", { name: "Dismiss" }).click();
   const folders = await racerFolders(view);
   const racers = await racerConversations(page, captainId, raceId);
   const post = (racer: number, text: string) => helpers().callCanvasTool(host, racer === 0 ? captainId : racers.get(racer)!, "race_board", { post: text });
@@ -291,8 +289,24 @@ test("screenshots of a race", async ({ page }) => {
     [4, [3, 1, 2], "Racer 3's clamp handles page 0 from the CSV export, which racer 2 found. Racer 1 is right otherwise."],
   ];
   for (const [racer, ranking, why] of votes) await helpers().callCanvasTool(host, racers.get(racer)!, "race_vote", { ranking, why });
+  await expect(view.getByText("The judge is reading their work", { exact: false })).toBeVisible();
+  const judgeRow = page.locator(".sidebar li[data-reorder-id]", { hasText: `Race ${raceId} · judge` });
+  await expect(judgeRow).toHaveCount(1);
+  const scores = [
+    { racer: 3, score: 9, why: "Does the whole task, and also clamps a page past the end, which the orders API's clients send. A test for each edge; the clamp is two lines." },
+    { racer: 1, score: 8, why: "Right and small, with the three tests the task asks for. A page past the end still comes back empty." },
+    { racer: 4, score: 7, why: "The same fix as racer 1, with racer 3's edge tests but not its clamp: sound, with little of its own." },
+    { racer: 2, score: 3, why: "Fixes the first page only. The last page is still empty, and its check fails." },
+  ];
+  const summary = "Racer 3 alone keeps paginate() right for a page past the end, which the CSV export asks for; racers 1 and 4 are otherwise as good.";
+  await helpers().callCanvasTool(host, (await judgeRow.getAttribute("data-reorder-id"))!, "race_judge", { scores, summary });
   await expect(view.getByText("Over: pick the work to take", { exact: false })).toBeVisible();
   await expect(view.getByRole("table", { name: "Results" }).locator('tr[data-racer="2"]')).toContainText("Failed (exit code 1)");
   await tidyForScreenshot(page, view);
   await takeScreenshot(page, "pick-the-work", page.locator(".canvas-panel:visible"), { downTo: view.getByRole("button", { name: "Let the captain pick" }) });
+
+  const judgeSection = view.locator("section", { has: view.getByRole("heading", { name: "Judge" }) });
+  await judgeSection.scrollIntoViewIfNeeded();
+  await expect(judgeSection.locator(".note-card").first()).toContainText("Racer 3 · 9/10");
+  await takeScreenshot(page, "judge-scores", page.locator(".canvas-panel:visible"), { from: judgeSection, downTo: judgeSection });
 });

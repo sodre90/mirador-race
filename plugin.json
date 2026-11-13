@@ -2,16 +2,17 @@
   "name": "race",
   "title": "Race",
   "icon": "icon.svg",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "api": 15,
   "tellsCaller": true,
-  "description": "Race a task on several agents at once, such as four of a small local model, or one on each of several profiles to compare them, each in a git worktree of its own. They share a board where they post what they learn and borrow from each other's work. The race page is a track where each racer runs from its start to the finish: its time, changes, latest note and the check Race ran in its folder, with a podium of the work that passed. An agent only fills in the race's form; you check it and start every race. Then you take the best work, or combine the best parts, from the page, or let the conversation that started the race pick.",
+  "description": "Race a task on several agents at once, such as four of a small local model, or one on each of several profiles to compare them, each in a git worktree of its own. They share a board where they post what they learn and borrow from each other's work. The race page is a track where each racer runs from its start to the finish: its time, changes, latest note and the check Race ran in its folder. Race can check the work with hidden tests the racers never see, and a judge can score it against the task, for a podium of the best work that passed. An agent only fills in the race's form, with its advice on how to check the work; you check it and start every race. Then you take the best work, or combine the best parts, from the page, or let the conversation that started the race pick.",
   "tagline": "Several agents race one task, each in a worktree of its own; you take the best work, or combine it.",
   "screenshots": [
     { "path": "screenshots/racers-beside-captain.png", "caption": "Four racers at work under the conversation that started the race, each in a lane on the race page" },
-    { "path": "screenshots/race-form.png", "caption": "/race:race opens a form: the task, a profile for each racer, the check, and whether they vote" },
+    { "path": "screenshots/race-form.png", "caption": "An agent's race arrives as a form for you to check, with its advice on how to check the work: the check, hidden tests and a judge" },
     { "path": "screenshots/race-under-way.png", "caption": "Each racer's lane: its profile, time, changes, latest note and check, with its changes inline" },
-    { "path": "screenshots/pick-the-work.png", "caption": "Once they're done, pick the work to take, with each racer's check and vote side by side" }
+    { "path": "screenshots/pick-the-work.png", "caption": "Once they're done, pick the work to take, with each racer's check, the judge's score and the vote side by side" },
+    { "path": "screenshots/judge-scores.png", "caption": "The judge's scores, best first, each with why" }
   ],
   "canvas": { "host": "host.ts", "view": "view.js" }
 }
