@@ -1,5 +1,6 @@
 import type { RanOn } from "./mirador/api.ts";
 import type { CheckResult } from "./race.ts";
+import type { ProblemValidation } from "./sets.ts";
 
 /** set.json: how a problem set's runs go. */
 export interface BenchSettings {
@@ -73,6 +74,8 @@ export interface BenchRun {
   phase: RunPhase;
   startedAt: number | null;
   endedAt: number | null;
+  /** Each problem's validation, as the form's Validate problems finds them; only a setup item keeps it. */
+  validation?: ProblemValidation[];
 }
 
 export const newRunId = () => crypto.randomUUID().slice(0, 6);

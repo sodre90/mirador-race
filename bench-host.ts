@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { CanvasActionContext, CanvasPluginContext, CanvasPluginStorage, CanvasTool, ConversationReply, PluginActivityEvent, PluginItem, PluginItemType, PluginProfile, StartedConversation, ToolCaller } from "./mirador/api.ts";
 import { cellsOf, cellsToStart, columnLabel, MAX_ATTEMPTS, MAX_AT_ONCE, newRunId, resultOf, resultsFileOf, retryPrompt, runSummary, type BenchCell, type BenchColumn, type BenchRun, type CellResult } from "./bench.ts";
 import { checks, endLeftover, type StartedCheck } from "./check.ts";
-import { copyCheckFiles, loadSet, type LoadedSet, type Problem } from "./sets.ts";
+import { copyCheckFiles, loadSet, validateProblem, type LoadedSet, type Problem, type ProblemValidation } from "./sets.ts";
 import { diffOf } from "./git.ts";
 import { DIFF_LIMIT, type CheckResult } from "./race.ts";
 
@@ -34,6 +34,7 @@ interface BenchInput {
 type BenchPageAction =
   | { kind: "profiles" }
   | { kind: "set" }
+  | { kind: "validate" }
   | ({ kind: "start" } & BenchInput)
   | { kind: "stop" }
   | { kind: "resume" }
@@ -53,6 +54,8 @@ const runCaptains = new Map<string, CaptainContext>();
 const loadedSets = new Map<string, LoadedSet>();
 /** The forms whose Start is starting their run, so a second press doesn't start it twice. */
 const startingForms = new Set<string>();
+/** The forms whose set is being validated, so a second press doesn't validate it twice. */
+const validatingForms = new Set<string>();
 /** The racers whose second try has begun, so the end of their first turn isn't taken for the second's. */
 const retryTurnsBegun = new Set<string>();
 /** The bench checks this run of Mirador runs, by `benchCheckKey`; a cell still checking but not here had its check cut short by a restart. */
@@ -441,6 +444,28 @@ async function startFromForm(form: PluginItem<BenchRun>, asked: BenchInput, cont
   }
 }
 
+/** Validates the set's problems one after another, putting each result on the form as it comes; a run that starts meanwhile ends it. */
+async function validateSet(form: PluginItem<BenchRun>, context: CanvasActionContext) {
+  const set = await loadSet(form.data.set.folder);
+  const validation: ProblemValidation[] = [];
+  for (const problem of set.problems) {
+    validation.push(await validateProblem(set, problem));
+    const current = context.items().find(({ id }) => id === form.id) as PluginItem<BenchRun> | undefined;
+    if (!current || current.data.phase !== "setup") return;
+    context.change(form.id, { data: { ...current.data, validation: [...validation] } });
+  }
+}
+
+function validateFromForm(form: PluginItem<BenchRun>, context: CanvasActionContext) {
+  if (form.data.phase !== "setup") throw new Error("The set can be validated only before the run starts.");
+  if (validatingForms.has(form.data.id)) throw new Error("The set is being validated already.");
+  validatingForms.add(form.data.id);
+  validateSet(form, context)
+    .catch((error) => console.error(`bench run ${form.data.id}: its set could not be validated:`, error))
+    .finally(() => validatingForms.delete(form.data.id));
+  return { validating: true };
+}
+
 /** A cell's work since its problem's start, as a patch, or why there is none to show yet. */
 async function cellWork(storage: CanvasPluginStorage, id: string, index: number) {
   const kept = keptRun(storage, id);
@@ -463,6 +488,7 @@ export async function benchAction(item: PluginItem<BenchRun>, action: unknown, c
     const set = await loadSet(item.data.set.folder);
     return { name: set.settings.name, problems: set.problems.map(({ id, tags }) => ({ id, tags })), problemsLeftOut: set.problemsLeftOut, settings: set.settings };
   }
+  if (asked.kind === "validate") return validateFromForm(item, context);
   if (asked.kind === "start") return startFromForm(item, asked, context);
   if (asked.kind === "stop") return stopRun(item.data.id, context);
   if (asked.kind === "resume") {

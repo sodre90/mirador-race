@@ -1,0 +1,150 @@
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { expect, test, type Page } from "@playwright/test";
+import { helpers, startHostWithThisPlugin, type TestHost } from "./mirador.ts";
+
+let host: TestHost;
+let promptsFile: string;
+let captainId = "";
+const profileName = "racer";
+
+/** Everything the stub agents were given, in order: the captain's prompts and the racers' alike. */
+const agentSaw = () => readFileSync(promptsFile, "utf8");
+const git = (...args: string[]) => execFileSync("git", ["-C", host.projectDir, ...args], { encoding: "utf8" }).trim();
+/** The stub agent writes relative to its own process's folder, not its session's, so the answer racer's file is an absolute one under the host's root, which its check reads. */
+const answerFile = () => join(host.root, "answer.txt");
+
+test.describe.configure({ mode: "serial" });
+
+/** A problem of the set: its task word for word and its check, starting from a commit of the set's repository. */
+function addProblem(id: string, task: string, check: string, start = `start/${id}`) {
+  const folder = join(host.projectDir, "problems", id);
+  mkdirSync(join(folder, "check"), { recursive: true });
+  writeFileSync(join(folder, "problem.json"), JSON.stringify({ start, check }));
+  writeFileSync(join(folder, "task.md"), task);
+}
+
+test.beforeAll(async () => {
+  ({ host, promptsFile } = await startHostWithThisPlugin());
+  git("init", "-q", "--initial-branch=main");
+  git("config", "user.name", "The Owner");
+  git("config", "user.email", "owner@example.test");
+  for (const id of ["answer", "never"]) {
+    git("checkout", "-q", "--orphan", `start/${id}`);
+    writeFileSync(join(host.projectDir, "README.md"), `# ${id}\n`);
+    git("add", "-A");
+    git("commit", "-qm", `start ${id}`);
+  }
+  git("checkout", "-q", "--orphan", "main");
+  git("rm", "-rqf", ".");
+  writeFileSync(join(host.projectDir, "set.json"), JSON.stringify({ name: "Tiny", tries: 2, checkTimeoutMinutes: 1 }));
+  addProblem("answer", `WRITE [{"edit": ${JSON.stringify(answerFile())}, "content": "42\\n"}]`, `grep -qx 42 ${answerFile()}`);
+  addProblem("never", "SAY I give up", "test -e done.txt");
+  git("add", "-A");
+  git("commit", "-qm", "set");
+});
+test.afterAll(async () => {
+  await host?.stop();
+  await host?.cleanUp();
+});
+
+/** The stub agent offers no model to pick, so this is `startConversation` without that wait. */
+async function startConversationWithoutModel(page: Page) {
+  const previousUrl = page.url();
+  await page.getByRole("button", { name: "+ New conversation" }).click();
+  await expect(page).not.toHaveURL(previousUrl);
+  return page.url().match(/#\/c\/(.+)$/)![1]!;
+}
+
+async function sendAndWait(page: Page, text: string) {
+  await helpers().sendMessage(page, text);
+  await expect(page.locator(".chat-header:visible .badge")).toHaveText("idle", { timeout: 60_000 });
+}
+
+const benchFrame = (page: Page) => page.locator(".canvas-panel:visible .canvas-body > .canvas-frame.plugin iframe");
+
+/** A new bench form in the captain's conversation, as /race:bench with nothing after it opens one. */
+async function openBenchForm(page: Page) {
+  const composer = page.locator(".composer:visible textarea");
+  await composer.fill("/race:bench");
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("/race:bench ");
+  await composer.press("Enter");
+  await expect(page.locator(".plugin-command-reply:visible")).toContainText("Choose the columns on the canvas, then press Start run.");
+  const view = helpers().walkthroughView(page);
+  await expect(view.getByRole("heading", { name: "New benchmark run" })).toBeVisible();
+  return view;
+}
+
+test("/race:bench shows a form whose run checks each racer's work, gives a failed one a second try, and shows the results and totals", async ({ page }) => {
+  await helpers().signIn(page, host);
+  await helpers().addWorkspace(page, host.projectDir);
+  const profiles = await helpers().createProfile(page, profileName, "", "", "opencode");
+  await profiles.getByRole("button", { name: "Close" }).click();
+  await page.getByLabel("Agent", { exact: true }).selectOption({ label: `${profileName} · opencode` });
+  captainId = await startConversationWithoutModel(page);
+  await sendAndWait(page, "Start");
+
+  const view = await openBenchForm(page);
+  await expect(view.locator(".race-head .meta")).toContainText("Tiny · 2 problems");
+  await view.getByLabel("Column 1's profile").selectOption(profileName);
+  await helpers().untilFramePainted(page, benchFrame(page));
+  await view.getByRole("button", { name: "Start run" }).click();
+
+  await expect(view.getByRole("heading", { name: /^Bench run \w+$/ })).toBeVisible();
+  const matrix = view.getByRole("table", { name: "Results" });
+  await expect(matrix.locator('button[data-cell="0"]'), "answer's racer wrote 42, and its check passed").toContainText("✓", { timeout: 60_000 });
+  await expect(matrix.locator('button[data-cell="1"]'), "never's racer failed its check, and its second try too").toContainText("✗ failed", { timeout: 60_000 });
+  await expect(matrix.locator("tfoot")).toContainText("1 of 2");
+  await expect(view.locator(".race-head .phase")).toHaveText("Done");
+  await expect.poll(agentSaw, "the captain heard the summary").toContain("is over", { timeout: 60_000 });
+  expect(agentSaw()).toContain("Bench run");
+
+  await matrix.locator('button[data-cell="0"]').click();
+  await expect(view.locator(".cell-details")).toContainText("answer · racer");
+  await expect(view.locator(".cell-details summary")).toContainText("Try 1: passed in");
+  await view.locator(".cell-details").getByRole("button", { name: "Changes" }).click();
+  await expect(view.locator(".cell-details").getByLabel("Changes")).toContainText("This racer hasn't changed anything yet.");
+});
+
+test("Validate problems shows which problems tell right from wrong", async ({ page }) => {
+  rmSync(answerFile(), { force: true });
+  mkdirSync(join(host.projectDir, "problems", "never", "reference"), { recursive: true });
+  writeFileSync(join(host.projectDir, "problems", "never", "reference", "done.txt"), "done\n");
+  git("add", "problems");
+  git("commit", "-qm", "never's reference");
+
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  const view = await openBenchForm(page);
+  await helpers().untilFramePainted(page, benchFrame(page));
+  await view.getByRole("button", { name: "Validate problems" }).click();
+
+  const validation = view.getByRole("table", { name: "Validation" });
+  await expect(validation.locator("tr", { hasText: "answer" }), "answer has no reference solution").toContainText("no reference", { timeout: 60_000 });
+  await expect(validation.locator("tr", { hasText: "never" }), "never's check fails on its start and passes with its reference").toContainText("✓ valid", { timeout: 60_000 });
+  await expect(view.getByRole("button", { name: "Validate problems" })).toBeEnabled();
+});
+
+test("Stop run stops it", async ({ page }) => {
+  addProblem("hold", `WRITE [{"waitFor": ${JSON.stringify(join(host.root, "never-made"))}}]`, "test -e done.txt", "start/answer");
+  git("add", "problems");
+  git("commit", "-qm", "a problem that holds its racer");
+
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  const view = await openBenchForm(page);
+  await view.getByLabel("Column 1's profile").selectOption(profileName);
+  await view.getByLabel("Problems").fill("hold");
+  await helpers().untilFramePainted(page, benchFrame(page));
+  await view.getByRole("button", { name: "Start run" }).click();
+
+  const matrix = view.getByRole("table", { name: "Results" });
+  await expect(matrix.locator('button[data-cell="0"]'), "the racer works until the file it waits for exists").toContainText("racing", { timeout: 60_000 });
+  await helpers().untilFramePainted(page, benchFrame(page));
+  await view.getByRole("button", { name: "Stop run" }).click();
+  await expect(matrix.locator('button[data-cell="0"]')).toContainText("stopped");
+  await expect(view.locator(".race-head .phase")).toHaveText("Stopped");
+  await expect(view.getByRole("button", { name: "Stop run" })).toHaveCount(0);
+});

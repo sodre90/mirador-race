@@ -4,6 +4,8 @@
  * vote; and, once it's over, a podium of the racers whose work passed and the racers side by side to take one's work.
  * Mirador posts the race on every change; what the page does goes to the plugin's host code with `mirador.send`, and
  * the user's pick to the captain with `mirador.prompt`, as their own message.
+ * The same file draws a benchmark run's page: its form before it starts, with the set's problems validated on request;
+ * then the problems against the columns, each cell its racer's result, with the totals and a cell's details.
  */
 
 const style = document.createElement("style");
@@ -42,10 +44,10 @@ style.textContent = `
   .title-row { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
   .race-clock { font: 600 1.35em var(--mirador-mono, monospace); font-variant-numeric: tabular-nums; color: var(--mirador-muted); }
   .phase { display: inline-flex; align-items: center; gap: 6px; padding: 1px 10px; border-radius: 999px; font-weight: 600; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); }
-  .phase-racing, .phase-voting, .phase-judging { --tone: var(--mirador-accent); }
-  .phase-picking, .phase-deciding { --tone: var(--mirador-ok); }
+  .phase-racing, .phase-voting, .phase-judging, .phase-running { --tone: var(--mirador-accent); }
+  .phase-picking, .phase-deciding, .phase-done { --tone: var(--mirador-ok); }
   .phase-stopped { --tone: var(--mirador-warn); }
-  .phase-racing::before, .phase-judging::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--tone); animation: pulse 1.3s ease-out infinite; }
+  .phase-racing::before, .phase-judging::before, .phase-running::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--tone); animation: pulse 1.3s ease-out infinite; }
   @keyframes pulse { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--tone) 60%, transparent); } to { box-shadow: 0 0 0 9px transparent; } }
   .race-head .meta code { display: inline-block; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
   .task { white-space: pre-wrap; margin: 0; }
@@ -80,7 +82,7 @@ style.textContent = `
   @keyframes bob { to { transform: translate(-50%, -2px); } }
   .lane .time { font: 600 1.1em var(--mirador-mono, monospace); font-variant-numeric: tabular-nums; text-align: right; }
   .lane-info { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
-  .lane .state { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 999px; font-size: 0.85em; font-weight: 600; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); }
+  .lane .state, .matrix .state { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border-radius: 999px; font-size: 0.85em; font-weight: 600; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); }
   .state-working, .state-starting, .state-checking { --tone: var(--mirador-accent); }
   .state-finished { --tone: var(--mirador-ok); }
   .state-failed { --tone: var(--mirador-danger); }
@@ -96,6 +98,13 @@ style.textContent = `
   .lane .note { white-space: pre-wrap; max-height: 4.4em; overflow: hidden; padding: 6px 10px; border-radius: 4px 12px 12px 12px; background: color-mix(in srgb, var(--racer) 8%, var(--mirador-bg)); border: 1px solid color-mix(in srgb, var(--racer) 25%, var(--mirador-border)); }
   .lane .checking { color: var(--mirador-accent); }
   .waiting { padding: 10px 0; border-top: 1px dashed var(--mirador-border); }
+
+  .matrix th > span { display: inline-flex; gap: 8px; align-items: center; }
+  .matrix .badge { --size: 22px; }
+  .matrix button.cell { font: inherit; border: 0; background: none; padding: 2px 9px; border-radius: 999px; text-align: left; }
+  .matrix button.cell:hover { background: color-mix(in srgb, var(--mirador-text) 8%, transparent); }
+  .matrix button.cell[aria-expanded="true"] { background: color-mix(in srgb, var(--mirador-accent) 14%, transparent); }
+  .cell-details { display: grid; gap: 8px; margin-top: 8px; padding: 10px 0 6px; border-top: 1px dashed var(--mirador-border); }
 
   .podium { display: flex; justify-content: center; align-items: flex-end; gap: 10px; padding-top: 6px; }
   .step { width: 150px; display: grid; justify-items: center; gap: 4px; text-align: center; }
@@ -234,6 +243,7 @@ setInterval(() => {
   const now = Date.now();
   for (const time of document.querySelectorAll("[data-since]")) time.textContent = clock(now - Number(time.dataset.since));
   for (const road of document.querySelectorAll("[data-working-since]")) road.style.setProperty("--at", String(positionOf({ state: "working", startedAt: Number(road.dataset.workingSince), endedAt: null }, now)));
+  for (const cell of document.querySelectorAll("[data-racing-since]")) cell.textContent = cellWords({ state: "working", startedAt: Number(cell.dataset.racingSince) }, now);
 }, 1000);
 
 /** What the page holds that the race doesn't: the open patches, the form's answers, and the passes it has cheered. */
@@ -794,7 +804,420 @@ function draw(race) {
   page.replaceChildren(...sections.flat().filter(Boolean));
 }
 
+/** What the bench page holds that the run doesn't: the form's answers, the set and profiles it asked for, the open cell and its patch. */
+const shownBench = { form: null, set: null, profiles: null, open: null, diffs: new Map(), resumeAsked: false };
+
+const MAX_COLUMNS = 6;
+const MAX_ATTEMPTS = 5;
+const MAX_AT_ONCE = 6;
+
+const BENCH_PHASE_WORDS = { running: "Running", done: "Done", stopped: "Stopped" };
+
+/** bench.ts's words for a run, copied word for word as the view can't import them; its seconds() is benchSeconds here, the race's own wording durations differently. */
+const columnLabel = ({ profile, model, effort }) => [profile, model, effort].filter(Boolean).join(" · ");
+
+function benchSeconds(ms) {
+  const total = Math.round(ms / 1000);
+  if (total < 60) return `${total} s`;
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes} m ${String(total % 60).padStart(2, "0")} s`;
+  return `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, "0")} m`;
+}
+
+function cellWords(cell, now) {
+  const { state, result, startedAt, endedAt } = cell;
+  if (state === "working") return `racing ${benchSeconds(now - startedAt)}`;
+  if (state === "retrying") return "try 2";
+  if (state !== "done") return state;
+  const took = benchSeconds(endedAt - startedAt);
+  if (result === "passed") return `✓ ${took}`;
+  if (result === "passed on try 2") return `✓ on try 2 · ${took}`;
+  if (result === "failed" || result === "timed out" || result === "agent failed") return `✗ ${result}`;
+  return result;
+}
+
+const median = (values) => {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((one, other) => one - other);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+
+const summedCost = (cells) => {
+  const costs = cells.flatMap(({ usage }) => (usage?.cost ? [usage.cost] : []));
+  const [first] = costs;
+  if (!first || costs.some(({ currency }) => currency !== first.currency)) return null;
+  return { amount: costs.reduce((sum, { amount }) => sum + amount, 0), currency: first.currency };
+};
+
+function totalsOf(run) {
+  return run.columns.map((_, column) => {
+    const cells = run.cells.filter((cell) => cell.column === column);
+    const done = cells.filter(({ result }) => result !== null);
+    const passed = done.filter(({ result }) => result === "passed" || result === "passed on try 2");
+    const durations = done
+      .filter(({ startedAt, endedAt }) => startedAt !== null && endedAt !== null)
+      .map(({ startedAt, endedAt }) => (endedAt - startedAt) / 1000);
+    return {
+      column,
+      done: done.length,
+      passedFirstTry: done.filter(({ result }) => result === "passed").length,
+      passed: passed.length,
+      problemsSolved: new Set(passed.map(({ problem }) => problem)).size,
+      medianSeconds: median(durations),
+      inputTokens: cells.reduce((sum, { usage }) => sum + (usage?.inputTokens ?? 0), 0),
+      outputTokens: cells.reduce((sum, { usage }) => sum + (usage?.outputTokens ?? 0), 0),
+      cost: summedCost(cells),
+    };
+  });
+}
+
+const tokenWords = (count) => (count < 1000 ? String(count) : `${Math.round(count / 1000)}k`);
+const costWords = ({ amount, currency }) => (currency === "USD" ? `$${amount.toFixed(2)}` : `${amount.toFixed(2)} ${currency}`);
+
+const passedWords = ({ passed, done, passedFirstTry }) => {
+  const onTry2 = passed - passedFirstTry;
+  return `${passed} of ${done} · ${done > 0 ? Math.round((passed / done) * 100) : 0}%${onTry2 > 0 ? ` · ${onTry2} on try 2` : ""}`;
+};
+
+const cellClass = (cell) => {
+  if (cell.state !== "done") return cell.state === "waiting" ? "empty" : "state state-working";
+  if (cell.result === "passed" || cell.result === "passed on try 2") return "check-passed";
+  if (cell.result === "stopped") return "check-stopped";
+  if (cell.result === "couldn't start") return "empty";
+  return "check-failed";
+};
+
+function loadBenchSet(run) {
+  if (shownBench.set) return;
+  shownBench.set = { name: run.set.name, problems: null, problemsLeftOut: [] };
+  window.mirador.send({ kind: "set" }).then(
+    (set) => {
+      shownBench.set = set;
+      drawBench(lastBench);
+    },
+    (error) => console.error("bench: the set could not be read:", error),
+  );
+}
+
+function loadBenchProfiles(run) {
+  if (shownBench.profiles) return;
+  shownBench.profiles = [];
+  window.mirador.send({ kind: "profiles" }).then(
+    (profiles) => {
+      shownBench.profiles = profiles;
+      const form = benchFormOf(run);
+      form.columns.forEach((column) => (column.profile = profiles.find((profile) => profile.name.toLowerCase() === column.profile.toLowerCase())?.name ?? profiles[0]?.name ?? ""));
+      drawBench(lastBench);
+    },
+    (error) => console.error("bench: the profiles could not be listed:", error),
+  );
+}
+
+/** The form's answers, from the run's draft the first time, then as the user changes them. */
+function benchFormOf(run) {
+  if (!shownBench.form) {
+    shownBench.form = {
+      columns: run.columns.length > 0 ? run.columns.map(({ profile, model, effort }) => ({ profile, model: model ?? "", effort: effort ?? "" })) : [{ profile: "", model: "", effort: "" }],
+      attempts: run.attempts,
+      atOnce: run.atOnce,
+      tries: run.settings.tries === 2,
+      problems: run.problems.join(", "),
+      validating: false,
+      error: "",
+    };
+  }
+  return shownBench.form;
+}
+
+/** Each problem's validation, as the host finds them: ✓ valid, or the words in the danger color, with the output folded. */
+function validationTable(run) {
+  if (!run.validation) return null;
+  return el(
+    "table",
+    { "aria-label": "Validation" },
+    el(
+      "tbody",
+      {},
+      run.validation.map(({ problem, validation, output }) => {
+        const verdict = validation === "valid" ? "✓ valid" : validation;
+        return el(
+          "tr",
+          {},
+          el("td", { text: problem }),
+          el("td", { class: validation === "valid" ? "check-passed" : "check-failed" }, output ? el("details", {}, el("summary", { text: verdict }), el("pre", { text: output })) : verdict),
+        );
+      }),
+    ),
+  );
+}
+
+function benchFormView(run) {
+  loadBenchSet(run);
+  loadBenchProfiles(run);
+  const form = benchFormOf(run);
+  const set = shownBench.set;
+  if (form.validating && set.problems && (run.validation?.length ?? 0) >= set.problems.length) form.validating = false;
+  const problem = el("p", { class: "problem", role: "alert", text: form.error });
+  const options = (chosen) => shownBench.profiles.map((profile) => el("option", { value: profile.name, selected: profile.name === chosen, text: profileLabel(profile) }));
+  const columnRows = form.columns.map((column, index) =>
+    el(
+      "div",
+      { class: "racer-row" },
+      badge(index + 1),
+      el("span", { text: `Column ${index + 1}` }),
+      el("select", { "aria-label": `Column ${index + 1}'s profile`, onchange: (event) => (column.profile = event.target.value) }, options(column.profile)),
+      el("input", { type: "text", "aria-label": `Column ${index + 1}'s model`, placeholder: "Model (optional)", value: column.model, style: "flex: 1; min-width: 7em", oninput: (event) => (column.model = event.target.value) }),
+      el("input", { type: "text", "aria-label": `Column ${index + 1}'s effort`, placeholder: "Effort (optional)", value: column.effort, style: "flex: 1; min-width: 7em", oninput: (event) => (column.effort = event.target.value) }),
+      form.columns.length > 1
+        ? el("button", {
+            text: "Remove",
+            "aria-label": `Remove column ${index + 1}`,
+            onclick: () => {
+              form.columns.splice(index, 1);
+              drawBench(lastBench);
+            },
+          })
+        : null,
+    ),
+  );
+  const validate = el("button", {
+    text: form.validating ? "Validating…" : "Validate problems",
+    disabled: form.validating,
+    onclick: async () => {
+      form.validating = true;
+      form.error = "";
+      drawBench(lastBench);
+      try {
+        await window.mirador.send({ kind: "validate" });
+        drawBench(lastBench);
+      } catch (error) {
+        form.validating = false;
+        form.error = error.message;
+        drawBench(lastBench);
+      }
+    },
+  });
+  const start = el("button", {
+    class: "primary",
+    text: "Start run",
+    onclick: async () => {
+      start.disabled = true;
+      form.error = "";
+      problem.textContent = "";
+      try {
+        const problems = form.problems.split(",").map((id) => id.trim()).filter(Boolean);
+        await window.mirador.send({
+          kind: "start",
+          columns: form.columns.map(({ profile, model, effort }) => ({ profile, ...(model ? { model } : {}), ...(effort ? { effort } : {}) })),
+          attempts: form.attempts,
+          tries: form.tries ? 2 : 1,
+          atOnce: form.atOnce,
+          ...(problems.length > 0 ? { problems } : {}),
+        });
+      } catch (error) {
+        form.error = error.message;
+        problem.textContent = error.message;
+        start.disabled = false;
+      }
+    },
+  });
+  return [
+    el(
+      "header",
+      { class: "race-head" },
+      el("h1", { text: "New benchmark run" }),
+      el("p", { class: "meta", text: [set.name, set.problems ? plural(set.problems.length, "problem", "problems") : null].filter(Boolean).join(" · ") }),
+    ),
+    set.problemsLeftOut.length > 0
+      ? el("div", {}, el("strong", { text: "Problems left out" }), el("ul", {}, set.problemsLeftOut.map(({ id, why }) => el("li", { text: `${id}: ${why}` }))))
+      : null,
+    el(
+      "div",
+      { class: "form" },
+      el(
+        "div",
+        { class: "form", role: "group", "aria-label": "Columns" },
+        el("strong", { text: "Columns" }),
+        columnRows,
+        form.columns.length < MAX_COLUMNS
+          ? el(
+              "div",
+              {},
+              el("button", {
+                text: "Add a column",
+                onclick: () => {
+                  form.columns.push({ profile: form.columns.at(-1)?.profile ?? shownBench.profiles[0]?.name ?? "", model: "", effort: "" });
+                  drawBench(lastBench);
+                },
+              }),
+            )
+          : null,
+      ),
+      el("label", {}, "Attempts", el("input", { type: "number", "aria-label": "Attempts", min: 1, max: MAX_ATTEMPTS, value: form.attempts, oninput: (event) => (form.attempts = Number(event.target.value)) })),
+      el("label", {}, "Racers at once per profile", el("input", { type: "number", "aria-label": "Racers at once per profile", min: 1, max: MAX_AT_ONCE, value: form.atOnce, oninput: (event) => (form.atOnce = Number(event.target.value)) })),
+      el("label", { class: "row" }, el("input", { type: "checkbox", checked: form.tries, onchange: (event) => (form.tries = event.target.checked) }), "A second try after a failed check"),
+      el("label", {}, "Problems", el("input", { type: "text", "aria-label": "Problems", placeholder: "All; or ids, separated by commas", value: form.problems, oninput: (event) => (form.problems = event.target.value) })),
+      el("div", {}, validate),
+      validationTable(run),
+      el("div", { class: "row" }, start, problem),
+    ),
+  ];
+}
+
+function benchHeader(run) {
+  return el(
+    "header",
+    { class: "race-head" },
+    el("div", { class: "title-row" }, el("h1", { text: `Bench run ${run.id}` })),
+    el(
+      "div",
+      { class: "meta" },
+      `${run.set.name} · ${run.set.commit ? run.set.commit.slice(0, 7) : "…"} · `,
+      el("span", { class: `phase phase-${run.phase}`, text: BENCH_PHASE_WORDS[run.phase] ?? run.phase }),
+      ` · ${plural(run.problems.length, "problem", "problems")} × ${plural(run.columns.length, "column", "columns")}`,
+    ),
+  );
+}
+
+function cellButton(cell, index) {
+  return el("button", {
+    class: `cell ${cellClass(cell)}`,
+    "data-cell": String(index),
+    "data-racing-since": cell.state === "working" ? String(cell.startedAt) : null,
+    "aria-expanded": shownBench.open === index ? "true" : "false",
+    text: cellWords(cell, Date.now()),
+    onclick: () => {
+      shownBench.open = shownBench.open === index ? null : index;
+      drawBench(lastBench);
+    },
+  });
+}
+
+/** The problems against the columns, one row per problem and attempt, with each column's totals under them. */
+function benchMatrix(run) {
+  const rows = [];
+  run.cells.forEach((cell, index) => {
+    const last = rows.at(-1);
+    if (last && last.problem === cell.problem && last.attempt === cell.attempt) last.cells.push({ cell, index });
+    else rows.push({ problem: cell.problem, attempt: cell.attempt, cells: [{ cell, index }] });
+  });
+  const totals = totalsOf(run);
+  return el(
+    "table",
+    { class: "matrix", "aria-label": "Results" },
+    el(
+      "thead",
+      {},
+      el("tr", {}, el("th", { text: "Problem" }), run.columns.map((column, index) => el("th", {}, el("span", {}, badge(index + 1), columnLabel(column))))),
+    ),
+    el(
+      "tbody",
+      {},
+      rows.map((row) =>
+        el(
+          "tr",
+          {},
+          el("th", { scope: "row", text: run.attempts > 1 ? `${row.problem} · attempt ${row.attempt}` : row.problem }),
+          row.cells.map(({ cell, index }) => el("td", {}, cellButton(cell, index))),
+        ),
+      ),
+    ),
+    el(
+      "tfoot",
+      {},
+      el("tr", {}, el("th", { scope: "row", text: "Passed" }), totals.map((total) => el("td", { text: passedWords(total) }))),
+      el("tr", {}, el("th", { scope: "row", text: "Median time" }), totals.map((total) => el("td", { text: total.medianSeconds === null ? "–" : benchSeconds(total.medianSeconds * 1000) }))),
+      el("tr", {}, el("th", { scope: "row", text: "Tokens" }), totals.map((total) => el("td", { text: `${tokenWords(total.inputTokens + total.outputTokens)}${total.cost ? ` · ${costWords(total.cost)}` : ""}` }))),
+    ),
+  );
+}
+
+/** The open cell's racer: its conversation, changes, tries, usage and note. */
+function cellDetails(run, problem) {
+  const index = shownBench.open;
+  const cell = index === null ? null : run.cells[index];
+  if (!cell) return null;
+  const column = run.columns[cell.column];
+  const diff = shownBench.diffs.get(index);
+  const toggleChanges = async () => {
+    if (shownBench.diffs.has(index)) shownBench.diffs.delete(index);
+    else {
+      shownBench.diffs.set(index, "Loading…");
+      drawBench(lastBench);
+      try {
+        const { diff: text } = await window.mirador.send({ kind: "diff", cell: index });
+        shownBench.diffs.set(index, text);
+      } catch (error) {
+        shownBench.diffs.delete(index);
+        problem.textContent = error.message;
+      }
+    }
+    drawBench(lastBench);
+  };
+  const open =
+    cell.conversationId && window.mirador.openConversation
+      ? el("button", { text: "Open", "data-hint": "Open this racer's conversation", onclick: () => window.mirador.openConversation(cell.conversationId).catch((error) => (problem.textContent = error.message)) })
+      : null;
+  return el(
+    "div",
+    { class: "cell-details" },
+    el("h2", { text: [cell.problem, columnLabel(column), run.attempts > 1 ? `attempt ${cell.attempt}` : null].filter(Boolean).join(" · ") }),
+    el("div", { class: "row" }, open, el("button", { text: diff ? "Hide changes" : "Changes", "aria-expanded": diff ? "true" : "false", onclick: toggleChanges })),
+    cell.tries.map(({ check }, number) =>
+      el(
+        "details",
+        { class: `check check-${check.outcome.replace(" ", "-")}` },
+        el("summary", { text: `Try ${number + 1}: ${check.outcome} in ${benchSeconds(check.durationMs)}` }),
+        check.output ? el("pre", { text: check.output }) : el("p", { class: "empty", text: "It printed nothing." }),
+      ),
+    ),
+    cell.usage ? el("p", { class: "meta", text: `${tokenWords(cell.usage.inputTokens)} in · ${tokenWords(cell.usage.outputTokens)} out${cell.usage.cost ? ` · ${costWords(cell.usage.cost)}` : ""}` }) : null,
+    cell.ranOn ? el("p", { class: "meta", text: `Ran on ${cell.ranOn.model.name}${cell.ranOn.effort ? ` · ${cell.ranOn.effort}` : ""}` }) : null,
+    cell.note ? el("p", { text: cell.note }) : null,
+    diff ? (diff === "Loading…" ? el("p", { class: "empty loading", text: diff }) : diffView(diff)) : null,
+  );
+}
+
+/** Cheers each cell that passes while the page shows; the ones that passed before it loaded stay quiet. */
+function benchCheer(run) {
+  const passed = (cell) => cell?.result === "passed" || cell?.result === "passed on try 2";
+  if (!lastBench || !run.cells.some((cell, index) => passed(cell) && !passed(lastBench.cells[index]))) return;
+  confetti(lastBench.cells.some(passed) ? 50 : 140);
+}
+
+function benchRunView(run) {
+  benchCheer(run);
+  const problem = el("p", { class: "problem", role: "alert" });
+  const stop =
+    run.phase === "running"
+      ? el("button", { class: "stop", text: "Stop run", onclick: () => window.mirador.send({ kind: "stop" }).catch((error) => (problem.textContent = error.message)) })
+      : null;
+  return [benchHeader(run), el("section", { class: "track" }, benchMatrix(run), cellDetails(run, problem)), el("div", { class: "row" }, stop, problem)];
+}
+
+let lastBench = null;
+
+/** A run already running when the page loads may have been cut short by a restart of Mirador, which reloads the page; the run carries on. A run this page watched start needs no resume: its cells are starting, not cut short. */
+function resumeBench(run) {
+  if (shownBench.resumeAsked || run.phase !== "running" || lastBench !== null) return;
+  shownBench.resumeAsked = true;
+  window.mirador.send({ kind: "resume" }).catch((error) => console.error("bench: the run could not go on after a restart:", error));
+}
+
+function drawBench(run) {
+  resumeBench(run);
+  const sections = run.phase === "setup" ? benchFormView(run) : benchRunView(run);
+  page.replaceChildren(...sections.flat().filter(Boolean));
+  lastBench = run;
+}
+
 window.mirador.onItem((item) => {
+  if (item.type === "bench") {
+    if (lastBench?.phase === "setup" && item.data.phase !== "setup") shownBench.form = null;
+    drawBench(item.data);
+    return;
+  }
   if (lastRace?.phase === "setup" && item.data.phase !== "setup") shown.form = null;
   draw(item.data);
 });

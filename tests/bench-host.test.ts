@@ -366,6 +366,31 @@ test("the form starts its run on its own page, once", async () => {
   await expect(mirador.act({ kind: "whatever" })).rejects.toThrow("A run's page starts and stops its run and shows a racer's changes.");
 });
 
+test("validate checks every problem of the set one after another, and the form keeps the results until the run starts", async () => {
+  await makeSet(repo, ["valid", "passes"]);
+  mkdirSync(join(repo, "problems", "valid", "reference"), { recursive: true });
+  writeFileSync(join(repo, "problems", "valid", "reference", "answer.txt"), "42\n");
+  writeFileSync(join(repo, "problems", "passes", "check", "check.sh"), "echo already right\n");
+  await git(repo, ["add", "-A"]);
+  await git(repo, ["commit", "-qm", "a reference and a check that passes on its start"]);
+  const mirador = miradorOf({ caller: "agent" });
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+
+  expect(await mirador.act({ kind: "validate" })).toEqual({ validating: true });
+  await expect(mirador.act({ kind: "validate" })).rejects.toThrow("The set is being validated already.");
+  await until(() => mirador.page().validation?.length === 2, "both problems validated");
+
+  expect(mirador.page().phase).toBe("setup");
+  expect(mirador.page().validation).toEqual([
+    { problem: "passes", validation: "passes on its start", output: "already right\n" },
+    { problem: "valid", validation: "valid", output: "" },
+  ]);
+
+  await mirador.act({ kind: "start", columns: [{ profile: "Kimi" }] });
+  await until(() => mirador.started.length === 2, "the racers started");
+  expect(mirador.page().validation, "a started run keeps no validation").toBeUndefined();
+});
+
 test("a run's page shows a racer's changes since its problem's start", async () => {
   await makeSet(repo, ["a", "b"]);
   const mirador = miradorOf();
