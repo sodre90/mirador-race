@@ -11,6 +11,10 @@ import { loadSet, validateProblem } from "../sets.ts";
 import { fakeMirador, finished, git, until } from "./fake-mirador.ts";
 
 const FAKE_ENGINE = `#!/bin/sh
+if [ "$1" = rm ]; then
+  printf '%s\\0' "$@" > "$FAKE_ENGINE_REMOVED"
+  exit 1
+fi
 printf '%s\\0' "$0" "$@" > "$FAKE_ENGINE_ARGS"
 for command; do :; done
 folder=$(mktemp -d)
@@ -18,15 +22,17 @@ printf '%s' "$folder" > "$FAKE_ENGINE_FOLDER"
 trap 'rm -rf "$folder"' EXIT
 trap 'exit 143' TERM
 cd "$folder" || exit 1
-sh -lc "$command"
+cat > "$FAKE_ENGINE_ARCHIVE"
+sh -lc "$command" < "$FAKE_ENGINE_ARCHIVE"
 status=$?
 exit $status
 `;
 
+/** Like ssh, it joins the arguments after the host into one line a shell reads again. */
 const FAKE_SSH = `#!/bin/sh
-printf '%s\\0' "$@" > "$FAKE_SSH_ARGS"
+printf '%s\\0' "$@" >> "$FAKE_SSH_ARGS"
 shift
-exec "$@"
+exec sh -c "$*"
 `;
 
 const SHELL_WITHOUT_PROFILE = `#!/bin/sh
@@ -44,6 +50,18 @@ const writeScript = async (name: string, text: string) => {
   await chmod(file, 0o755);
 };
 
+/** The names in a tar file, read from its headers: macOS's own tar hides the ._ entries it adds when it lists one. */
+function tarNames(file: string): string[] {
+  const archive = readFileSync(file);
+  const text = (from: number, length: number) => archive.subarray(from, from + length).toString("latin1").replace(/\0.*$/s, "");
+  const namesFrom = (at: number): string[] => {
+    if (at + 512 > archive.length || text(at, 100) === "") return [];
+    const size = parseInt(text(at + 124, 12).trim() || "0", 8);
+    return [text(at, 100), ...namesFrom(at + 512 + Math.ceil(size / 512) * 512)];
+  };
+  return namesFrom(0);
+}
+
 const recorded = (file: string) => readFileSync(file, "utf8").split("\0").slice(0, -1);
 
 beforeEach(async () => {
@@ -60,6 +78,8 @@ beforeEach(async () => {
   process.env.SHELL = join(bin, "shell");
   process.env.FAKE_ENGINE_ARGS = join(scratch, "engine-args");
   process.env.FAKE_ENGINE_FOLDER = join(scratch, "engine-folder");
+  process.env.FAKE_ENGINE_REMOVED = join(scratch, "engine-removed");
+  process.env.FAKE_ENGINE_ARCHIVE = join(scratch, "engine-archive.tar");
   process.env.FAKE_SSH_ARGS = join(scratch, "ssh-args");
 });
 
@@ -68,6 +88,8 @@ afterEach(async () => {
   process.env.SHELL = keptShell;
   delete process.env.FAKE_ENGINE_ARGS;
   delete process.env.FAKE_ENGINE_FOLDER;
+  delete process.env.FAKE_ENGINE_REMOVED;
+  delete process.env.FAKE_ENGINE_ARCHIVE;
   delete process.env.FAKE_SSH_ARGS;
   await rm(scratch, { recursive: true, force: true });
 });
@@ -88,6 +110,7 @@ async function racerFolder(answer: string) {
   await writeFile(join(folder, "notes.txt"), "how I solved it\n");
   await writeFile(join(folder, "secret.txt"), "ignored\n");
   await writeFile(join(folder, "check.sh"), "echo the racer's own check\nexit 1\n");
+  if (process.platform === "darwin") Bun.spawnSync(["xattr", "-w", "com.example.race-test", "macOS tar would add ._answer.txt for this", join(folder, "answer.txt")]);
   return folder;
 }
 
@@ -124,9 +147,9 @@ test("settingsOf says what each wrong container field must be", () => {
   expect(settingsOf({ container: { image: "i", workdir: "/w", engine: "rkt" } }, "tiny")).toBe("set.json's container.engine must be docker or podman.");
 });
 
-test("containerCommand puts ssh and the engine in front of the run, and quotes its paths", () => {
+test("containerCommand puts ssh in front of the engine, and quotes its paths", () => {
   const command = containerCommand({ image: "test-image", workdir: "/work", host: "bench box", engine: "podman" }, "/check files", "sh check.sh", "/racer's folder");
-  expect(command).toContain("'ssh' 'bench box' 'podman' 'run' '-i' '--rm' '-w' '/work' 'test-image' 'sh' '-lc' 'tar --ignore-zeros -xf - && sh check.sh'");
+  expect(command).toContain("ssh 'bench box' ");
   expect(command).toContain("'/racer'\\''s folder'");
   expect(command).toContain("'/check files'");
   expect(containerCommand(CONTAINER, "/check", "sh check.sh", "/racer")).not.toContain("ssh");
@@ -141,20 +164,14 @@ test("the folder's tracked and untracked files and the check files arrive in the
 
   expect(result).toMatchObject({ outcome: "passed", exitCode: 0 });
   expect(result.output).toContain("container-check-ok");
-  expect(recorded(process.env.FAKE_ENGINE_ARGS!)).toEqual([
-    join(bin, "docker"),
-    "run",
-    "-i",
-    "--rm",
-    "-w",
-    "/work",
-    "test-image",
-    "sh",
-    "-lc",
-    "tar --ignore-zeros -xf - && sh check.sh",
-  ]);
+  const args = recorded(process.env.FAKE_ENGINE_ARGS!);
+  expect(args).toEqual([join(bin, "docker"), "run", "-i", "--rm", "--sig-proxy=false", "--name", expect.stringMatching(/^mirador-check-[0-9a-f]{8}$/), "-w", "/work", "test-image", "sh", "-lc", "tar -xf - && sh check.sh"]);
+  expect(recorded(process.env.FAKE_ENGINE_REMOVED!), "the container is removed by name, gone or not").toEqual(["rm", "-f", args[6]!]);
   expect(existsSync(readFileSync(process.env.FAKE_ENGINE_FOLDER!, "utf8")), "the container's folder is gone").toBe(false);
   expect(readFileSync(join(folder, "check.sh"), "utf8"), "the racer's own files stay as they were").toBe("echo the racer's own check\nexit 1\n");
+  const names = tarNames(process.env.FAKE_ENGINE_ARCHIVE!);
+  expect(names).toContain("answer.txt");
+  expect(names.filter((name) => name.split("/").at(-1)!.startsWith("._")), "no macOS metadata files, which a Linux container would unpack as files").toEqual([]);
 });
 
 test("a failing check in the container fails with what it printed", async () => {
@@ -176,6 +193,9 @@ test("a container check that runs out of time ends as timed out, and its process
 
   expect(result).toMatchObject({ outcome: "timed out", exitCode: null });
   expect(result.output).toContain("slow");
+  const name = recorded(process.env.FAKE_ENGINE_ARGS!)[6]!;
+  await until(() => existsSync(process.env.FAKE_ENGINE_REMOVED!), "the stopped container was removed");
+  expect(recorded(process.env.FAKE_ENGINE_REMOVED!)).toEqual(["rm", "-f", name]);
   const groupAlive = () => {
     try {
       process.kill(-running.pid!, 0);
@@ -196,20 +216,16 @@ test("an ssh host puts ssh in front of the run, with podman as the engine", asyn
   const result = await runContainerCheck(settings.container!, check, "sh check.sh", folder, { timeoutMs: 30_000 }).result;
 
   expect(result).toMatchObject({ outcome: "passed", exitCode: 0 });
+  const engineArgs = recorded(process.env.FAKE_ENGINE_ARGS!);
+  expect(engineArgs[0]).toBe(join(bin, "podman"));
+  expect(engineArgs.at(-1), "the check reaches the container whole, through ssh's second reading").toBe("tar -xf - && sh check.sh");
+  const name = engineArgs[6]!;
   expect(recorded(process.env.FAKE_SSH_ARGS!)).toEqual([
     "bench-box",
-    "podman",
-    "run",
-    "-i",
-    "--rm",
-    "-w",
-    "/work",
-    "test-image",
-    "sh",
-    "-lc",
-    "tar --ignore-zeros -xf - && sh check.sh",
+    `'podman' 'run' '-i' '--rm' '--sig-proxy=false' '--name' '${name}' '-w' '/work' 'test-image' 'sh' '-lc' 'tar -xf - && sh check.sh'`,
+    "bench-box",
+    `'podman' 'rm' '-f' '${name}'`,
   ]);
-  expect(recorded(process.env.FAKE_ENGINE_ARGS!)[0]).toBe(join(bin, "podman"));
 });
 
 /** A set whose checks run in the container, with one problem: make answer.txt hold 42. */
