@@ -1,0 +1,7 @@
+{
+  "files": {
+    "solution": ["src/lib.rs", "Cargo.toml"],
+    "test": ["tests/acronym.rs"],
+    "example": [".meta/example.rs"]
+  }
+}

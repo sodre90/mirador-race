@@ -66,10 +66,40 @@ test("a go exercise keeps its go.mod and gets go's check", async () => {
 test("an exercise whose example doesn't map gets no reference, and the report names it", async () => {
   const report = await importPolyglot(polyglot, set, { languages: ["rust"] });
 
-  expect(report).toEqual({ problems: 1, byLanguage: { rust: 1 }, withoutReference: ["rust-odd"] });
+  expect(report).toEqual({ problems: 3, byLanguage: { rust: 3 }, withoutReference: ["rust-odd"] });
   expect(existsSync(join(problem("rust-odd"), "reference"))).toBe(false);
   expect(await read(join(problem("rust-odd"), "check", "tests", "odd.rs"))).toBe(await read(join(exercise("rust", "odd"), "tests", "odd.rs")));
   expect(await filesOn("start/rust-odd")).toEqual(["Cargo.toml", "src/lib.rs"]);
+});
+
+test("a C++ exercise's CMakeLists.txt names its sources after the exercise, not after the folder a racer works in", async () => {
+  await importPolyglot(polyglot, set, { languages: ["cpp"] });
+
+  const cmakeLists = await git(set, ["show", "start/cpp-gigasecond:CMakeLists.txt"]);
+  expect(cmakeLists).toContain("set(exercise gigasecond)");
+  expect(cmakeLists).not.toContain("get_filename_component(exercise");
+  expect(await readdirNames(join(problem("cpp-gigasecond"), "reference"))).toEqual(["gigasecond.cpp", "gigasecond.h"]);
+});
+
+test("a Rust exercise whose Cargo.toml has no example keeps it as it starts, with src/lib.rs as its reference", async () => {
+  const report = await importPolyglot(polyglot, set, { languages: ["rust"] });
+
+  expect(report.withoutReference).toEqual(["rust-odd"]);
+  expect(await readdirNames(join(problem("rust-acronym"), "reference"))).toEqual(["src"]);
+  expect(await read(join(problem("rust-acronym"), "reference", "src", "lib.rs"))).toBe(await read(join(exercise("rust", "acronym"), ".meta", "example.rs")));
+  expect(await filesOn("start/rust-acronym")).toEqual(["Cargo.toml", "src/lib.rs"]);
+});
+
+test("a Rust exercise whose example needs crates gets the Cargo.toml that lists them as its reference", async () => {
+  await importPolyglot(polyglot, set, { languages: ["rust"] });
+
+  expect(await read(join(problem("rust-robot-name"), "reference", "Cargo.toml"))).toBe(await read(join(exercise("rust", "robot-name"), ".meta", "Cargo-example.toml")));
+  expect(await read(join(problem("rust-robot-name"), "reference", "src", "lib.rs"))).toBe(await read(join(exercise("rust", "robot-name"), ".meta", "example.rs")));
+  expect(await git(set, ["show", "start/rust-robot-name:Cargo.toml"])).toBe(await read(join(exercise("rust", "robot-name"), "Cargo.toml")));
+});
+
+test("a Python check brings its own pytest through uv, so it doesn't depend on which Python the shell finds first", () => {
+  expect(CHECKS.python).toBe("uvx pytest -q");
 });
 
 test("--languages and --limit choose which exercises come in, and an unknown language is refused, naming the ones there are", async () => {
@@ -126,10 +156,10 @@ test("a set folder with uncommitted changes, or inside another repository, is re
 test("the import leaves the set repository's working tree clean, with one commit per import that changed something", async () => {
   const report = await importPolyglot(polyglot, set);
 
-  expect(report).toEqual({ problems: 3, byLanguage: { go: 1, python: 1, rust: 1 }, withoutReference: ["rust-odd"] });
+  expect(report).toEqual({ problems: 6, byLanguage: { cpp: 1, go: 1, python: 1, rust: 3 }, withoutReference: ["rust-odd"] });
   expect(await git(set, ["status", "--porcelain"])).toBe("");
   expect((await git(set, ["rev-list", "--count", "HEAD"])).trim()).toBe("1");
-  expect((await git(set, ["log", "-1", "--format=%s"])).trim()).toBe("Import 3 Aider Polyglot problems");
+  expect((await git(set, ["log", "-1", "--format=%s"])).trim()).toBe("Import 6 Aider Polyglot problems");
 
   await importPolyglot(polyglot, set);
 

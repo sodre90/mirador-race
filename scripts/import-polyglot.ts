@@ -5,7 +5,7 @@ import { basename, dirname, extname, join, relative } from "node:path";
 const LANGUAGES = ["cpp", "go", "java", "javascript", "python", "rust"];
 
 export const CHECKS: Record<string, string> = {
-  python: "python3 -m pytest -q",
+  python: "uvx pytest -q",
   go: "go test ./...",
   rust: "cargo test --quiet -- --include-ignored",
   java: "find src/test -name '*.java' -exec perl -pi -e 's/\\@Disabled(\\([^)]*\\))?//g' {} + && sh gradlew test --quiet",
@@ -77,16 +77,32 @@ function exampleFor(solution: string, exampleFiles: string[]) {
   return sameExtension.length === 1 ? sameExtension[0] : undefined;
 }
 
+/** Each solution file with its example; one without, such as Rust's Cargo.toml, stays as it starts. */
 function referenceFor(solutionFiles: string[], exampleFiles: string[]): [string, string][] | null {
   const pairs = solutionFiles.flatMap((solution) => {
     const example = exampleFor(solution, exampleFiles);
     return example ? [[solution, example] as [string, string]] : [];
   });
-  return pairs.length === solutionFiles.length ? pairs : null;
+  return pairs.length > 0 ? pairs : null;
+}
+
+/** The exercise's examples, with the Cargo.toml a Rust example needs for its crates, which config.json doesn't list. */
+async function examplesOf(exerciseFolder: string, config: ExerciseConfig) {
+  const cargoExample = ".meta/Cargo-example.toml";
+  return (await readIfThere(join(exerciseFolder, cargoExample))) === null ? config.files.example : [...config.files.example, cargoExample];
+}
+
+const NAME_FROM_FOLDER = "get_filename_component(exercise ${CMAKE_CURRENT_SOURCE_DIR} NAME)";
+
+/** Exercism's CMakeLists.txt names the sources after its folder, which in a racer's worktree isn't the exercise's. */
+async function pinExerciseName(work: string, slug: string) {
+  const cmakeLists = join(work, "CMakeLists.txt");
+  const text = await readIfThere(cmakeLists);
+  if (text?.includes(NAME_FROM_FOLDER)) await writeFile(cmakeLists, text.replace(NAME_FROM_FOLDER, `set(exercise ${slug})`));
 }
 
 /** The racer's starting folder as a commit on start/<id>, built with a scratch index so the set's own files and index stay untouched. */
-async function startCommit(setFolder: string, exerciseFolder: string, testFiles: string[], id: string) {
+async function startCommit(setFolder: string, exerciseFolder: string, testFiles: string[], slug: string, id: string) {
   const temp = await mkdtemp(join(tmpdir(), "polyglot-start-"));
   try {
     const work = join(temp, "work");
@@ -98,6 +114,7 @@ async function startCommit(setFolder: string, exerciseFolder: string, testFiles:
         return path === "" || (![".meta", ".docs"].includes(path.split("/")[0]!) && !testFiles.includes(path));
       },
     });
+    await pinExerciseName(work, slug);
     const env = { GIT_INDEX_FILE: join(temp, "index") };
     await mustGit(setFolder, ["--work-tree", work, "add", "-A"], env);
     const tree = (await mustGit(setFolder, ["write-tree"], env)).trim();
@@ -125,7 +142,7 @@ async function writeProblem(setFolder: string, exerciseFolder: string, language:
   await writeFile(join(problemFolder, "problem.json"), json({ start: `start/${id}`, check: CHECKS[language], tags: [language] }));
   await writeFile(join(problemFolder, "task.md"), await taskOf(exerciseFolder, config.files.solution));
   for (const test of config.files.test) await copyInto(join(exerciseFolder, test), join(problemFolder, "check", test));
-  const reference = referenceFor(config.files.solution, config.files.example);
+  const reference = referenceFor(config.files.solution, await examplesOf(exerciseFolder, config));
   if (reference) for (const [solution, example] of reference) await copyInto(join(exerciseFolder, example), join(problemFolder, "reference", solution));
   else report.withoutReference.push(id);
 }
@@ -152,7 +169,7 @@ export async function importPolyglot(polyglotFolder: string, setFolder: string, 
       const exerciseFolder = join(practice, slug);
       const config = JSON.parse(await readFile(join(exerciseFolder, ".meta", "config.json"), "utf8")) as ExerciseConfig;
       await writeProblem(setFolder, exerciseFolder, language, id, config, report);
-      await startCommit(setFolder, exerciseFolder, config.files.test, id);
+      await startCommit(setFolder, exerciseFolder, config.files.test, slug, id);
       report.byLanguage[language] = (report.byLanguage[language] ?? 0) + 1;
     }
   }

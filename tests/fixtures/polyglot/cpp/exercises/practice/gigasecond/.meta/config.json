@@ -1,0 +1,7 @@
+{
+  "files": {
+    "solution": ["gigasecond.cpp", "gigasecond.h"],
+    "test": ["gigasecond_test.cpp"],
+    "example": [".meta/example.cpp", ".meta/example.h"]
+  }
+}
