@@ -29,9 +29,18 @@ command -v docker >/dev/null 2>&1 || {
 work=$(mktemp -d) || exit 1
 tmp_root=$(printenv TMPDIR) && [ -n "$tmp_root" ] || tmp_root=/tmp
 lock="$tmp_root/race-swebench-$instance_id.lock"
+run_id="race-$(basename "$work")"
+image="swebench/sweb.eval.x86_64.$(printf '%s' "$instance_id" | sed 's/__/_1776_/g'):latest"
 held=""
+pulled=""
+remove_harness_leftovers() {
+  [ -n "$held" ] || return 0
+  # The name swebench 4.1.0's harness gives the instance's container: TestSpec.get_instance_container_name(run_id).
+  docker rm -f "sweb.eval.$instance_id.$run_id" >/dev/null 2>&1
+  [ -z "$pulled" ] || docker rmi "$image" >/dev/null 2>&1
+}
 trap '[ -z "$held" ] || rm -rf "$lock"; rm -rf "$work"' EXIT
-trap 'exit 143' TERM
+trap 'remove_harness_leftovers; exit 143' TERM
 
 own_index=$(git rev-parse --git-path index)
 if [ -f "$own_index" ]; then
@@ -59,10 +68,12 @@ held=1
 echo $$ > "$lock/pid"
 
 # SWE-bench publishes x86_64 images only, and its harness pulls for this machine's platform, which fails on arm64.
-image="swebench/sweb.eval.x86_64.$(printf '%s' "$instance_id" | sed 's/__/_1776_/g'):latest"
-docker image inspect "$image" >/dev/null 2>&1 || docker pull --quiet --platform linux/amd64 "$image" >/dev/null || {
-  echo "Docker couldn't pull $image."
-  exit 1
+docker image inspect "$image" >/dev/null 2>&1 || {
+  pulled=1
+  docker pull --quiet --platform linux/amd64 "$image" >/dev/null || {
+    echo "Docker couldn't pull $image."
+    exit 1
+  }
 }
 
 tab=$(printf '\t')
@@ -70,7 +81,6 @@ cr=$(printf '\r')
 patch_json=$(sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/$tab/\\\\t/g" -e "s/$cr/\\\\r/g" "$work/model.patch" | awk 'BEGIN { ORS = "" } NR > 1 { printf "\\n" } { printf "%s", $0 }')
 printf '[{"instance_id": "%s", "model_name_or_path": "race", "model_patch": "%s"}]\n' "$instance_id" "$patch_json" > "$work/predictions.json"
 
-run_id="race-$(basename "$work")"
 cd "$work" || exit 1
 uvx --python 3.12 --from swebench==${SWEBENCH_VERSION} python -m swebench.harness.run_evaluation \
   --dataset_name ${DATASET} \

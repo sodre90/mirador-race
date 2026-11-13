@@ -7,10 +7,10 @@ import { SWEBENCH_CHECK } from "../scripts/import-swebench.ts";
 
 const FAKE_UVX = `#!/bin/sh
 if ! mkdir "$FAKE_UVX_BUSY" 2>/dev/null; then echo "two harness runs at once" >> "$FAKE_UVX_OVERLAP"; fi
-sleep "\${FAKE_UVX_SECONDS:-0}"
-rmdir "$FAKE_UVX_BUSY" 2>/dev/null
 printf '%s\\0' "$@" > "$FAKE_UVX_ARGS"
 pwd > "$FAKE_UVX_CWD"
+sleep "\${FAKE_UVX_SECONDS:-0}"
+rmdir "$FAKE_UVX_BUSY" 2>/dev/null
 prev=""
 for arg; do
   case "$prev" in
@@ -34,8 +34,8 @@ exit "\${FAKE_UVX_EXIT:-0}"
 
 const FAKE_DOCKER = `#!/bin/sh
 printf '%s\\0' "$@" >> "$FAKE_DOCKER_ARGS"
-if [ "$1 $2" = "image inspect" ]; then exit 1; fi
-if [ "$1" = pull ]; then exit "\${FAKE_DOCKER_PULL_EXIT:-0}"; fi
+if [ "$1 $2" = "image inspect" ]; then exit "\${FAKE_DOCKER_INSPECT_EXIT:-1}"; fi
+if [ "$1" = pull ]; then sleep "\${FAKE_DOCKER_PULL_SECONDS:-0}"; exit "\${FAKE_DOCKER_PULL_EXIT:-0}"; fi
 exit 0
 `;
 
@@ -89,8 +89,18 @@ async function makeRacer() {
   await git(["add", "calc.py"]);
 }
 
-async function runCheckScript({ resolved = true, noReport = false, uvxExit, pullExit, uvxSeconds }: { resolved?: boolean; noReport?: boolean; uvxExit?: number; pullExit?: number; uvxSeconds?: number } = {}) {
-  const env = {
+interface CheckOptions {
+  resolved?: boolean;
+  noReport?: boolean;
+  uvxExit?: number;
+  pullExit?: number;
+  inspectExit?: number;
+  uvxSeconds?: number;
+  pullSeconds?: number;
+}
+
+function checkEnv({ resolved = true, noReport = false, uvxExit, pullExit, inspectExit, uvxSeconds, pullSeconds }: CheckOptions = {}) {
+  return {
     ...process.env,
     PATH: bin,
     TMPDIR: scratch,
@@ -99,6 +109,8 @@ async function runCheckScript({ resolved = true, noReport = false, uvxExit, pull
     ...(uvxSeconds === undefined ? {} : { FAKE_UVX_SECONDS: String(uvxSeconds) }),
     FAKE_DOCKER_ARGS: join(scratch, "docker-args"),
     ...(pullExit === undefined ? {} : { FAKE_DOCKER_PULL_EXIT: String(pullExit) }),
+    ...(inspectExit === undefined ? {} : { FAKE_DOCKER_INSPECT_EXIT: String(inspectExit) }),
+    ...(pullSeconds === undefined ? {} : { FAKE_DOCKER_PULL_SECONDS: String(pullSeconds) }),
     FAKE_UVX_ARGS: join(scratch, "uvx-args"),
     FAKE_UVX_CWD: join(scratch, "uvx-cwd"),
     FAKE_UVX_PREDICTIONS: join(scratch, "predictions.json"),
@@ -106,9 +118,33 @@ async function runCheckScript({ resolved = true, noReport = false, uvxExit, pull
     FAKE_UVX_NO_REPORT: noReport ? "1" : "0",
     ...(uvxExit === undefined ? {} : { FAKE_UVX_EXIT: String(uvxExit) }),
   };
-  const child = Bun.spawn(["/bin/sh", "swebench-check.sh", instanceId, baseCommit], { cwd: folder, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+}
+
+async function runCheckScript(options: CheckOptions = {}) {
+  const child = Bun.spawn(["/bin/sh", "swebench-check.sh", instanceId, baseCommit], { cwd: folder, env: checkEnv(options), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   return { stdout, stderr, exitCode };
+}
+
+/** The check in a process group of its own, as runCheck runs it, so a test can stop it with TERM. */
+function startCheckScript(options: CheckOptions = {}) {
+  return Bun.spawn(["/bin/sh", "swebench-check.sh", instanceId, baseCommit], { cwd: folder, env: checkEnv(options), detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+}
+
+/** TERMs the check's whole group once the fake harness runs, and resolves to the check's exit code. */
+async function stopRunningCheck(child: ReturnType<typeof startCheckScript>) {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(join(scratch, "uvx-args"))) {
+    if (Date.now() > deadline) throw new Error("the harness never started");
+    await Bun.sleep(20);
+  }
+  process.kill(-child.pid, "SIGTERM");
+  return child.exited;
+}
+
+async function harnessContainerName() {
+  const args = await recordedArgs();
+  return `sweb.eval.${instanceId}.${args[args.indexOf("--run_id") + 1]}`;
 }
 
 const dockerCalls = () => readFile(join(scratch, "docker-args"), "utf8").then((text) => text.split("\0").slice(0, -1));
@@ -232,3 +268,38 @@ test("a lock left by a check that is gone is taken over", async () => {
   expect(exitCode).toBe(0);
   expect(existsSync(lock)).toBe(false);
 });
+
+test("a stopped check removes the harness's container and the image it pulled, and leaves no lock or temp folder", async () => {
+  const exitCode = await stopRunningCheck(startCheckScript({ uvxSeconds: 30 }));
+
+  expect(exitCode).toBe(143);
+  const image = "swebench/sweb.eval.x86_64.demo_1776_alpha-1:latest";
+  expect(await dockerCalls()).toEqual(["image", "inspect", image, "pull", "--quiet", "--platform", "linux/amd64", image, "rm", "-f", await harnessContainerName(), "rmi", image]);
+  expect(existsSync(join(scratch, `race-swebench-${instanceId}.lock`)), "the lock is gone").toBe(false);
+  expect(existsSync((await readFile(join(scratch, "uvx-cwd"), "utf8")).trim()), "the temp folder is gone").toBe(false);
+}, 20_000);
+
+test("a stopped check keeps an image that was there before it", async () => {
+  const exitCode = await stopRunningCheck(startCheckScript({ uvxSeconds: 30, inspectExit: 0 }));
+
+  expect(exitCode).toBe(143);
+  const image = "swebench/sweb.eval.x86_64.demo_1776_alpha-1:latest";
+  expect(await dockerCalls()).toEqual(["image", "inspect", image, "rm", "-f", await harnessContainerName()]);
+  expect(existsSync(join(scratch, `race-swebench-${instanceId}.lock`)), "the lock is gone").toBe(false);
+  expect(existsSync((await readFile(join(scratch, "uvx-cwd"), "utf8")).trim()), "the temp folder is gone").toBe(false);
+}, 20_000);
+
+test("a check stopped while it pulls the image removes what the pull left", async () => {
+  const child = startCheckScript({ pullSeconds: 30 });
+  const deadline = Date.now() + 10_000;
+  while (!(existsSync(join(scratch, "docker-args")) && (await dockerCalls()).includes("pull"))) {
+    if (Date.now() > deadline) throw new Error("the pull never started");
+    await Bun.sleep(20);
+  }
+  process.kill(-child.pid, "SIGTERM");
+
+  expect(await child.exited).toBe(143);
+  const image = "swebench/sweb.eval.x86_64.demo_1776_alpha-1:latest";
+  expect((await dockerCalls()).slice(-5), "the image, there or half there, is removed").toEqual(["rm", "-f", expect.stringMatching(/^sweb\.eval\.demo__alpha-1\.race-/), "rmi", image]);
+  expect(existsSync(join(scratch, "uvx-args")), "the harness never ran").toBe(false);
+}, 20_000);
