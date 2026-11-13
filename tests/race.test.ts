@@ -52,8 +52,10 @@ function fakeMirador({ refuseRacer, caller = "user" }: { refuseRacer?: number; c
   const contextOf = (conversationId: string): Context => ({
     conversationId,
     caller,
+    workspace: { id: "workspace", name: "repo", folder: repo },
     storage,
     profiles: () => PROFILES,
+    usageOf: () => ({ inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, cachedWriteTokens: 0, cost: null, turns: 0 }),
     items: () => items.filter((item) => item.conversationId === conversationId),
     change(itemId, { title, data }) {
       const item = items.find((each) => each.id === itemId && each.conversationId === conversationId);
@@ -90,6 +92,9 @@ function fakeMirador({ refuseRacer, caller = "user" }: { refuseRacer?: number; c
     async stopConversation(id) {
       stopped.push(id);
     },
+    async promptStarted(id, text) {
+      prompts.push({ conversationId: id, text, afterTurn: true });
+    },
     openInEditor() {},
   });
   const captain = contextOf(crypto.randomUUID());
@@ -101,7 +106,7 @@ function fakeMirador({ refuseRacer, caller = "user" }: { refuseRacer?: number; c
   const raceItem = () => items.find((item) => item.type === ITEM_TYPE && item.conversationId === captain.conversationId)!;
   const act = (action: Record<string, unknown>) => host.action!(raceItem(), action, captain);
   const heard = (number: number, activity: PluginActivity) =>
-    host.activity!({ ...activity, conversationId: started[number - 1]!.id, conversationTitle: "", at: Date.now() } as never, { storage, windowChanged() {}, profileSetting: () => null });
+    host.activity!({ ...activity, conversationId: started[number - 1]!.id, conversationTitle: "", at: Date.now() } as never, { storage, windowChanged() {}, profileSetting: () => null, profiles: () => PROFILES, settingOfProfile: () => null });
   const promptsTo = (conversationId: string) => prompts.filter((prompt) => prompt.conversationId === conversationId);
   return { captain, contextOf, call, page, racer, replied, judgeReplied, heard, prompts, promptsTo, stopped, started, beside, items, raceItem, act };
 }
