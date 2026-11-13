@@ -6,9 +6,9 @@ import type { CanvasActionContext, CanvasHost, CanvasPluginContext, CanvasPlugin
 import { checks, endLeftover, type StartedCheck } from "./check.ts";
 import { copyCheckFilesOver, putBackOwnFiles, type KeptOwnFiles } from "./check-files.ts";
 import { BENCH_ITEM_TYPE, benchAction, benchActivity, benchItem, benchRacerEnded, benchRacerOf, benchTool } from "./bench-host.ts";
-import type { BenchRun } from "./bench.ts";
+import { isProblemId, type BenchRun } from "./bench.ts";
 import { changesOf, diffOf, git, mustGit, raceBase } from "./git.ts";
-import { isProblemId, loadSet, validateProblem, type ProblemValidation } from "./sets.ts";
+import { loadSet, validateProblem, type ProblemValidation } from "./sets.ts";
 import {
   DIFF_LIMIT,
   MAX_RACERS,
@@ -574,7 +574,7 @@ async function startCommitOf(racerFolder: string, base: string, checkFiles: stri
 
 /** Why the keep form's answers can't become a problem of the set, or null when they can. */
 async function keepRefusal(race: Race, setFolder: string, asked: { id: string; racer: number; checkFiles: string[]; check: string }): Promise<string | null> {
-  if (!isProblemId(asked.id)) return "A problem's id is lower-case letters, digits and dashes, at most 40.";
+  if (!isProblemId(asked.id)) return "A problem's id is lower case letters, digits, dots, dashes or underscores, starting with a letter or digit.";
   const branchTaken = (await git(setFolder, ["rev-parse", "--verify", "--quiet", `refs/heads/start/${asked.id}`])).exitCode === 0;
   if (existsSync(join(setFolder, "problems", asked.id)) || branchTaken) return `The set has a problem ${asked.id} already.`;
   if (!asked.check.trim()) return "Give the check command.";

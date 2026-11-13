@@ -81,12 +81,24 @@ test("its start branch has the base's files but not the check file, and the race
   expect(readFileSync(join(folder, "tests", "test.sh"), "utf8")).toBe(CHECK_SH);
 });
 
-test("a taken id, a folder that isn't a set, a missing check file, an empty check and a deleted racer are refused, each saying why", async () => {
+test("ids with dots and underscores are kept, as a set loads them", async () => {
+  const mirador = await racedOver();
+
+  for (const id of ["django__django-11099", "fix-1.2"]) {
+    const result = (await keep(mirador, { id })) as { kept: string; validation: { problem: string; validation: string } };
+    expect(result).toMatchObject({ kept: id, validation: { problem: id, validation: "valid" } });
+  }
+});
+
+test("a taken id, a bad id, a folder that isn't a set, a missing check file, an empty check and a deleted racer are refused, each saying why", async () => {
   const mirador = await racedOver();
   await keep(mirador);
 
+  const idRule = "A problem's id is lower case letters, digits, dots, dashes or underscores, starting with a letter or digit.";
   await expect(keep(mirador)).rejects.toThrow("The set has a problem answer already.");
-  await expect(keep(mirador, { id: "Bad Id" })).rejects.toThrow("A problem's id is lower-case letters, digits and dashes, at most 40.");
+  await expect(keep(mirador, { id: "Bad Id" })).rejects.toThrow(idRule);
+  await expect(keep(mirador, { id: "-lead" })).rejects.toThrow(idRule);
+  await expect(keep(mirador, { id: "a/b" })).rejects.toThrow(idRule);
   const plain = join(scratch, "plain");
   await mkdir(plain);
   await expect(keep(mirador, { id: "other", setFolder: plain })).rejects.toThrow("isn't a problem set");
