@@ -348,3 +348,46 @@ test("a check a restart of Mirador cut short runs again once the race page shows
   await expect(results.getByText(/Passed in [\d.]+ s/)).toHaveCount(2);
   await expect.poll(agentSaw).toContain(`answer in one line that race ${raceId} is over and waits for their pick.`);
 });
+
+test("Delete the racers, once the work is taken, deletes their conversations and worktrees and keeps their changes on the page", async ({ page }) => {
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  const composer = page.locator(".composer:visible textarea");
+  await composer.fill(`/race:race task="FOLDER deleted" profile=${profileName} racers=2`);
+  await composer.press("Enter");
+  const raceId = (await page.locator(".plugin-command-reply:visible").textContent())!.match(/Race (\w+) started/)![1]!;
+  const view = helpers().walkthroughView(page);
+  await expect(view.getByRole("heading", { name: `Race ${raceId}` })).toBeVisible();
+  await expect.poll(agentSaw).toContain(`answer in one line that race ${raceId} is over and waits for their pick.`);
+
+  const decided = agentSaw().slice(agentSaw().indexOf(`Race ${raceId} is over`));
+  const folderOf = (number: number) => decided.match(new RegExp(`- Racer ${number} \\(racer\\): finished · branch \\S+ · folder (\\S+) ·`))![1]!;
+  const branchOf = (number: number) => decided.match(new RegExp(`- Racer ${number} \\(racer\\): finished · branch (\\S+) ·`))![1]!;
+  writeFileSync(join(folderOf(1), "kept.ts"), "export const kept = 1;\n");
+  writeFileSync(join(folderOf(2), "kept.ts"), "export const kept = 2;\n");
+  const racers = await racerConversations(page, captainId, raceId);
+
+  const results = view.getByRole("table", { name: "Results" });
+  await expect(results.locator("tbody tr")).toHaveCount(2);
+  await expect(view.getByRole("button", { name: "Delete the racers" }), "the race waits for the pick, so nothing offers to delete yet").toHaveCount(0);
+  await results.locator('tr[data-racer="1"]').getByRole("button", { name: "Take this" }).click();
+  await expect.poll(agentSaw).toContain(`Take racer 1's work from race ${raceId} into your branch:`);
+  await expect(view.getByText("You took racer 1's work; the conversation that started the race is on it.")).toBeVisible();
+  await expect(page.locator(".chat-header:visible .badge"), "the captain answered the pick and its turn ended").toHaveText("idle", { timeout: 60_000 });
+
+  await view.getByRole("button", { name: "Delete the racers" }).click();
+  await expect(view.getByText("This deletes each racer's conversation, worktree and branch. Their changes stay on this page.")).toBeVisible();
+  await view.getByRole("button", { name: "Delete them" }).click();
+  await expect(view.getByText("The racers were deleted; their changes stay on this page.")).toBeVisible();
+
+  for (const id of racers.values()) await expect(page.locator(`.sidebar li[data-reorder-id="${id}"]`), "the racers' conversations leave the sidebar").toHaveCount(0);
+  for (const number of [1, 2]) {
+    await expect.poll(() => existsSync(folderOf(number)), `racer ${number}'s worktree folder is gone`).toBe(false);
+    await expect.poll(() => raceBranches().includes(branchOf(number)), `racer ${number}'s branch is gone`).toBe(false);
+  }
+  const lane = view.locator('.lane[data-racer="1"]');
+  await expect(lane.getByRole("button", { name: "Open" }), "a deleted racer has no conversation to open").toHaveCount(0);
+  await lane.getByRole("button", { name: "Changes" }).click();
+  await expect(lane.getByLabel("Changes"), "racer 1's Changes still shows its file").toContainText("+++ b/kept.ts");
+  await expect(lane.getByLabel("Changes")).toContainText("+export const kept = 1;");
+});

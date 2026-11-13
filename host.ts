@@ -85,7 +85,8 @@ type PageAction =
   | { kind: "diff"; racer: number }
   | { kind: "resume" }
   | { kind: "pick"; pick: RacePick }
-  | { kind: "picked"; pick: RacePick };
+  | { kind: "picked"; pick: RacePick }
+  | { kind: "deleteRacers" };
 
 /** What starting a race takes of the conversation it starts from, a tool's call or the user's press on the form. */
 type StartsRacers = CanvasPluginContext<Race | BenchRun> & Pick<CanvasActionContext<Race | BenchRun>, "startConversation" | "stopConversation" | "prompt">;
@@ -106,6 +107,8 @@ const racerContexts = new Map<string, CanvasToolContext<Race | BenchRun>>();
 const refreshes = new Map<string, { running: boolean; last: number }>();
 /** The forms whose Start is starting their race, so a second press doesn't start it twice. */
 const startingForms = new Set<string>();
+/** The races whose racers are being deleted, so a second press doesn't delete them twice. */
+const deletingRacers = new Set<string>();
 /** The racers this run of Mirador checks, by `startedCheckKey`; a racer still checking but not here had its check cut short by a restart. */
 const checksUnderWay = new Set<string>();
 
@@ -162,7 +165,7 @@ async function refreshChanges(storage: CanvasPluginStorage, id: string, { now = 
     const kept = keptRace(storage, id);
     if (!kept) return;
     const { racers } = kept.race;
-    const made = racers.filter(({ folder }) => existsSync(folder));
+    const made = racers.filter(({ folder, deletedAt }) => typeof deletedAt !== "number" && existsSync(folder));
     const base = kept.race.base ?? (made.length === racers.length ? await raceBase(made[0]!.folder, racers.map(({ branch }) => branch)) : null);
     if (!base) return;
     const changes = await Promise.all(made.map(async ({ number, folder }) => ({ number, changes: await changesOf(folder, base).catch(() => null) })));
@@ -179,11 +182,15 @@ async function refreshChanges(storage: CanvasPluginStorage, id: string, { now = 
   }
 }
 
-/** A racer's work since the race's base, as a patch, or why there is none to show yet. */
+/** A racer's work since the race's base, as a patch, or why there is none to show yet; a deleted racer's is the patch kept when it went. */
 async function racerWork(storage: CanvasPluginStorage, id: string, number: number) {
   const race = keptRace(storage, id)?.race;
   const racer = race?.racers.find((each) => each.number === number);
   if (!race || !racer) throw new Error(`Race ${id} has racers 1 to ${race?.racers.length ?? 0}.`);
+  if (typeof racer.deletedAt === "number") {
+    if (racer.patch === null) return `Racer ${number}'s changes couldn't be kept when it was deleted.`;
+    return racer.patch || `Racer ${number} didn't change anything.`;
+  }
   await refreshChanges(storage, id, { now: true });
   const base = keptRace(storage, id)!.race.base;
   if (!base || !existsSync(racer.folder)) return `Racer ${number} hasn't started yet; look again in a minute.`;
@@ -210,6 +217,8 @@ function startedRacer(number: number, started: StartedConversation): Racer {
     startedAt: Date.now(),
     endedAt: null,
     check: null,
+    patch: null,
+    deletedAt: null,
   };
 }
 
@@ -442,7 +451,11 @@ function racePicking(id: string, storage: CanvasPluginStorage) {
 }
 
 /** The message that hands the user's pick to the captain, which the page sends as their own. */
-const pick = (id: string, chosen: RacePick, storage: CanvasPluginStorage) => ({ message: pickMessage(racePicking(id, storage), chosen) });
+function pick(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
+  const message = pickMessage(racePicking(id, storage), chosen);
+  update(storage, id, (race) => (race.pickAskedAt = Date.now()));
+  return { message };
+}
 
 /** Once the page sent the pick, the race is the captain's to finish. */
 function picked(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
@@ -452,6 +465,62 @@ function picked(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
     race.picked = pickWords(chosen);
   });
   return { picked: true };
+}
+
+/** Whether the page may delete the racers: a stopped race, or one whose work the captain has taken. */
+const canDeleteRacers = (race: Race) => race.phase === "stopped" || (race.phase === "deciding" && typeof race.workTakenAt === "number");
+
+/**
+ * The captain's turn after the pick takes the work when it ends, and a later turn starting means it isn't taken yet:
+ * the pick's message may fold into the turn it is in, queue behind it, or start one of its own.
+ */
+function hearCaptain(event: PluginActivityEvent, storage: CanvasPluginStorage) {
+  if (event.kind !== "turn-started" && event.kind !== "turn-ended") return;
+  for (const id of raceIds(storage)) {
+    const kept = keptRace(storage, id);
+    if (!kept || kept.captain !== event.conversationId) continue;
+    const { phase, pickAskedAt } = kept.race;
+    if ((phase !== "picking" && phase !== "deciding") || typeof pickAskedAt !== "number" || pickAskedAt > event.at) continue;
+    update(storage, id, (race) => (race.workTakenAt = event.kind === "turn-ended" ? event.at : null));
+  }
+}
+
+/** Deletes each racer's conversation and worktree, as the user's delete does, keeping its changes as its patch on the page. */
+async function deleteRacers(id: string, context: CanvasActionContext<Race | BenchRun>) {
+  const kept = keptRace(context.storage, id);
+  if (!kept) throw new Error("This race is no longer kept.");
+  if (!canDeleteRacers(kept.race)) throw new Error("Delete the racers once the captain has taken their work.");
+  if (deletingRacers.has(id)) throw new Error("The racers are being deleted already.");
+  deletingRacers.add(id);
+  let deleted = 0;
+  try {
+    for (const racer of kept.race.racers) {
+      if (typeof racer.deletedAt === "number") continue;
+      let patch: string | null = null;
+      if (kept.race.base && existsSync(racer.folder)) {
+        try {
+          const diff = await diffOf(racer.folder, kept.race.base);
+          patch = diff.length <= DIFF_LIMIT ? diff : `${diff.slice(0, DIFF_LIMIT)}\n\n[Cut at ${DIFF_LIMIT} characters.]`;
+        } catch {}
+      }
+      context.storage.set(racerKey(racer.conversationId), undefined);
+      try {
+        await context.deleteStarted(racer.conversationId);
+      } catch (error) {
+        console.error(`race ${id}: racer ${racer.number}'s conversation could not be deleted:`, error);
+      }
+      update(context.storage, id, (race) => {
+        const gone = race.racers.find(({ number }) => number === racer.number);
+        if (!gone) return;
+        gone.patch = patch;
+        gone.deletedAt = Date.now();
+      });
+      deleted += 1;
+    }
+  } finally {
+    deletingRacers.delete(id);
+  }
+  return { deleted };
 }
 
 const raceDescription =
@@ -715,9 +784,11 @@ const host: CanvasHost<Race | BenchRun> = {
     }
     if (asked.kind === "pick") return pick(id, asked.pick, context.storage);
     if (asked.kind === "picked") return picked(id, asked.pick, context.storage);
-    throw new Error("A race's page starts and stops its race, shows a racer's changes, carries it on after a restart and takes the user's pick.");
+    if (asked.kind === "deleteRacers") return deleteRacers(id, context);
+    throw new Error("A race's page starts and stops its race, shows a racer's changes, carries it on after a restart, takes the user's pick and deletes its racers.");
   },
   async activity(event, context) {
+    hearCaptain(event, context.storage);
     if (benchRacerOf(context.storage, event.conversationId)) return benchActivity(event, context.storage);
     await hearActivity(event, context.storage);
   },

@@ -116,6 +116,8 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
   const act = (action: Record<string, unknown>) => host.action!(raceItem(), action, captain);
   const heard = (number: number, activity: PluginActivity) =>
     host.activity!({ ...activity, conversationId: started[number - 1]!.id, conversationTitle: "", at: Date.now() } as never, { storage, windowChanged() {}, profileSetting: () => null, profiles: () => PROFILES, settingOfProfile: () => null });
+  const captainHeard = (activity: PluginActivity) =>
+    host.activity!({ ...activity, conversationId: captain.conversationId, conversationTitle: "", at: Date.now() } as never, { storage, windowChanged() {}, profileSetting: () => null, profiles: () => PROFILES, settingOfProfile: () => null });
   const promptsTo = (conversationId: string) => prompts.filter((prompt) => prompt.conversationId === conversationId);
-  return { captain, contextOf, call, page, racer, replied, judgeReplied, heard, prompts, promptsTo, stopped, deleted, started, beside, items, raceItem, act };
+  return { captain, contextOf, call, page, racer, replied, judgeReplied, heard, captainHeard, prompts, promptsTo, stopped, deleted, started, beside, items, raceItem, act };
 }

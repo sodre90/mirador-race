@@ -246,8 +246,8 @@ setInterval(() => {
   for (const cell of document.querySelectorAll("[data-racing-since]")) cell.textContent = cellWords({ state: "working", startedAt: Number(cell.dataset.racingSince) }, now);
 }, 1000);
 
-/** What the page holds that the race doesn't: the open patches, the form's answers, and the passes it has cheered. */
-const shown = { diffs: new Map(), form: null, profiles: null, combine: new Set(), how: "", resumeAsked: false, taskOpen: false, cheered: null };
+/** What the page holds that the race doesn't: the open patches, the form's answers, the passes it has cheered, and the racers' delete as it is asked and runs. */
+const shown = { diffs: new Map(), form: null, profiles: null, combine: new Set(), how: "", resumeAsked: false, taskOpen: false, cheered: null, deleteAsked: false, deleting: false, deleteProblem: "" };
 
 function diffView(text) {
   const lines = text.split("\n").map((line) => {
@@ -323,9 +323,10 @@ function lane(race, racer, place, problem) {
     }
     draw(lastRace);
   };
-  const open = window.mirador.openConversation
-    ? el("button", { text: "Open", "data-hint": "Open this racer's conversation", onclick: () => window.mirador.openConversation(racer.conversationId).catch((error) => (problem.textContent = error.message)) })
-    : null;
+  const open =
+    window.mirador.openConversation && typeof racer.deletedAt !== "number"
+      ? el("button", { text: "Open", "data-hint": "Open this racer's conversation", onclick: () => window.mirador.openConversation(racer.conversationId).catch((error) => (problem.textContent = error.message)) })
+      : null;
   const check = racer.check
     ? el(
         "details",
@@ -619,6 +620,49 @@ function comparison(race) {
   return el("section", { class: "results-section" }, el("h2", { text: picks ? "Pick the work to take" : "Results" }), table, combine, footer, problem);
 }
 
+/** host.ts's canDeleteRacers, copied word for word as the view can't import it. */
+const canDeleteRacers = (race) => race.phase === "stopped" || (race.phase === "deciding" && typeof race.workTakenAt === "number");
+
+async function sendDeleteRacers() {
+  shown.deleting = true;
+  shown.deleteProblem = "";
+  draw(lastRace);
+  try {
+    await window.mirador.send({ kind: "deleteRacers" });
+    shown.deleteAsked = false;
+  } catch (error) {
+    shown.deleteProblem = error.message;
+    shown.deleteAsked = false;
+  }
+  shown.deleting = false;
+  draw(lastRace);
+}
+
+/** Deleting the racers once the work is taken: the button, its confirmation, and what came of the delete. */
+function deleteRacersView(race) {
+  if (!["stopped", "deciding"].includes(race.phase)) return null;
+  const problem = el("p", { class: "problem", role: "alert", text: shown.deleteProblem });
+  if (race.racers.length > 0 && race.racers.every((racer) => typeof racer.deletedAt === "number"))
+    return el("div", {}, el("p", { text: "The racers were deleted; their changes stay on this page." }), problem);
+  if (!canDeleteRacers(race))
+    return race.phase === "deciding" ? el("div", {}, el("p", { class: "meta", text: "Once the captain has taken the work, you can delete the racers here." }), problem) : null;
+  if (shown.deleting) return el("div", {}, el("button", { text: "Deleting…", disabled: true }), problem);
+  if (shown.deleteAsked)
+    return el(
+      "div",
+      {},
+      el(
+        "div",
+        { class: "row" },
+        el("span", { text: "This deletes each racer's conversation, worktree and branch. Their changes stay on this page." }),
+        el("button", { class: "primary", text: "Delete them", onclick: sendDeleteRacers }),
+        el("button", { text: "Cancel", onclick: () => { shown.deleteAsked = false; draw(lastRace); } }),
+      ),
+      problem,
+    );
+  return el("div", {}, el("button", { text: "Delete the racers", onclick: () => { shown.deleteAsked = true; shown.deleteProblem = ""; draw(lastRace); } }), problem);
+}
+
 /** How long the race has run: live while it races, else until its last racer's work and check ended. */
 function raceClock(race) {
   if (race.phase === "racing") return el("span", { class: "race-clock", "data-since": String(race.startedAt), text: clock(Date.now() - race.startedAt) });
@@ -673,7 +717,9 @@ function raceView(race) {
     race.phase === "racing"
       ? el("button", { class: "stop", text: "Stop race", onclick: () => window.mirador.send({ kind: "stop" }).catch((error) => (problem.textContent = error.message)) })
       : null;
-  return [header(race), podium(race), comparison(race), lanes(race, problem), el("div", { class: "row" }, stop, problem), board(race), vote(race), judge(race)];
+  const results = comparison(race);
+  const deleteRacers = deleteRacersView(race);
+  return [header(race), podium(race), results, results ? deleteRacers : null, lanes(race, problem), results ? null : deleteRacers, el("div", { class: "row" }, stop, problem), board(race), vote(race), judge(race)];
 }
 
 /** The form's answers, from the race's draft the first time, then as the user changes them. */

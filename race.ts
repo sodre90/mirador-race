@@ -34,6 +34,9 @@ export interface Racer {
   /** When its work ended, before Race checked it. */
   endedAt: number | null;
   check: CheckResult | null;
+  /** Its changes since the race's base, saved when it's deleted: "" when there were none, null when they couldn't be read or it isn't deleted. */
+  patch: string | null;
+  deletedAt: number | null;
 }
 
 export interface Note {
@@ -109,6 +112,10 @@ export interface Race {
   judging: Judging | null;
   /** What the user picked on the page, in a few words. */
   picked: string | null;
+  /** When the page asked for the pick's message. */
+  pickAskedAt: number | null;
+  /** When a captain turn after the pick ended, while no later one has started. */
+  workTakenAt: number | null;
   /** The commit every racer started from, once git knows all their branches. */
   base: string | null;
   startedAt: number;
@@ -193,6 +200,8 @@ export function blankRace(request: Partial<RaceRequest>, { advice }: { advice?: 
     standings: null,
     judging: null,
     picked: null,
+    pickAskedAt: null,
+    workTakenAt: null,
     base: null,
     startedAt: Date.now(),
   };

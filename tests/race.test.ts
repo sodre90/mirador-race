@@ -6,7 +6,7 @@ import { join } from "node:path";
 import host, { ITEM_TYPE } from "../host.ts";
 import { runCheck, CheckQueue, endLeftover, type RunningCheck } from "../check.ts";
 import { copyCheckFilesOver } from "../check-files.ts";
-import { raceRequest, tally, type CheckResult, type Race } from "../race.ts";
+import { raceRequest, tally, type CheckResult, type Race, type Racer } from "../race.ts";
 import { fakeMirador as fakeMiradorIn, finished, git, PROFILES, until } from "./fake-mirador.ts";
 
 let scratch: string;
@@ -427,6 +427,151 @@ test("combining racers asks the captain for the parts the user wants, and lettin
   for (const number of [1, 2]) await other.replied(number, finished("done"));
   const { message: decide } = (await other.act({ kind: "pick", pick: { kind: "captain" } })) as { message: string };
   expect(decide).toContain("Now decide:");
+});
+
+test("deleteRacers is refused while the race is racing or picking, and deletes nothing", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  const refusal = "Delete the racers once the captain has taken their work.";
+
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow(refusal);
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  expect(mirador.page().phase).toBe("picking");
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow(refusal);
+
+  expect(mirador.deleted).toEqual([]);
+  expect(mirador.page().racers.map(({ deletedAt }) => deletedAt)).toEqual([null, null]);
+});
+
+test("after the pick, deleteRacers waits for the captain's turn to end, and a later turn starting holds it again", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  const refusal = "Delete the racers once the captain has taken their work.";
+
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.captainHeard({ kind: "turn-started" });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow(refusal);
+
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  expect(typeof mirador.page().workTakenAt).toBe("number");
+
+  await mirador.captainHeard({ kind: "turn-started" });
+  expect(mirador.page().workTakenAt).toBeNull();
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow(refusal);
+
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  expect(await mirador.act({ kind: "deleteRacers" })).toEqual({ deleted: 2 });
+});
+
+test("a captain's turn that ended before the pick doesn't count as taking the work", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+
+  expect(mirador.page().workTakenAt).toBeNull();
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow("Delete the racers once the captain has taken their work.");
+});
+
+test("a race stored without the new fields, as Race 0.4.0 left it, shows no racer deleted and refuses deleteRacers in deciding", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  const id = mirador.page().id;
+  const kept = mirador.captain.storage.get(`race:${id}`) as { race: Race };
+  const stored = kept.race as Partial<Race>;
+  delete stored.pickAskedAt;
+  delete stored.workTakenAt;
+  for (const racer of kept.race.racers) {
+    delete (racer as Partial<Racer>).patch;
+    delete (racer as Partial<Racer>).deletedAt;
+  }
+  mirador.captain.storage.set(`race:${id}`, kept);
+
+  expect(await mirador.act({ kind: "diff", racer: 1 })).toEqual({ diff: "Racer 1 hasn't changed anything yet." });
+  expect(mirador.page().racers.every((racer) => typeof racer.deletedAt !== "number")).toBe(true);
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  expect(mirador.page().workTakenAt).toBeUndefined();
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow("Delete the racers once the captain has taken their work.");
+  expect(mirador.deleted).toEqual([]);
+});
+
+test("once the work is taken, deleteRacers deletes every racer, keeping each one's changes on the page, and the judge stays", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, judge: "Kimi" });
+  writeFileSync(join(mirador.started[0]!.folder, "app.ts"), "export const answer = 42;\n");
+  writeFileSync(join(mirador.started[1]!.folder, "notes.md"), "the answer is 42\n");
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.judgeReplied(finished("I read them all."));
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+
+  const first = mirador.act({ kind: "deleteRacers" });
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow("The racers are being deleted already.");
+  expect(await first).toEqual({ deleted: 2 });
+
+  expect(mirador.deleted).toEqual(mirador.started.map(({ id }) => id));
+  const race = mirador.page();
+  expect(race.racers[0]!.patch).toContain("+export const answer = 42;");
+  expect(race.racers[1]!.patch).toContain("+the answer is 42");
+  expect(race.racers.map(({ changes }) => changes)).toEqual(["1 file, +1 −1", "1 file, +1 −0"]);
+  for (const racer of race.racers) expect(typeof racer.deletedAt).toBe("number");
+  for (const { id } of mirador.started) expect(mirador.captain.storage.get(`racer:${id}`)).toBeUndefined();
+  expect(mirador.captain.storage.get(`judge:${mirador.beside[0]!.id}`)).toEqual({ race: race.id });
+  expect(await mirador.act({ kind: "diff", racer: 1 })).toEqual({ diff: race.racers[0]!.patch });
+  expect(await mirador.act({ kind: "diff", racer: 2 })).toEqual({ diff: race.racers[1]!.patch });
+  expect(await mirador.act({ kind: "deleteRacers" })).toEqual({ deleted: 0 });
+});
+
+test("a stopped race can delete its racers too", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  writeFileSync(join(mirador.started[0]!.folder, "app.ts"), "export const answer = 42;\n");
+  await mirador.act({ kind: "diff", racer: 1 });
+  await mirador.act({ kind: "stop" });
+
+  expect(await mirador.act({ kind: "deleteRacers" })).toEqual({ deleted: 2 });
+
+  expect(mirador.deleted).toEqual(mirador.started.map(({ id }) => id));
+  expect(mirador.page().racers[0]!.patch).toContain("+export const answer = 42;");
+  expect(mirador.page().racers[1]!.patch).toBe("");
+});
+
+test("a racer that changed nothing gets an empty patch, and its diff says it didn't change anything", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.act({ kind: "pick", pick: { kind: "captain" } });
+  await mirador.act({ kind: "picked", pick: { kind: "captain" } });
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+
+  expect(await mirador.act({ kind: "deleteRacers" })).toEqual({ deleted: 2 });
+
+  expect(mirador.page().racers.map(({ patch }) => patch)).toEqual(["", ""]);
+  expect(await mirador.act({ kind: "diff", racer: 1 })).toEqual({ diff: "Racer 1 didn't change anything." });
+});
+
+test("a racer whose folder is gone when it's deleted keeps no patch, and its diff says so", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  await rm(mirador.started[0]!.folder, { recursive: true, force: true });
+
+  expect(await mirador.act({ kind: "deleteRacers" })).toEqual({ deleted: 2 });
+
+  expect(mirador.page().racers[0]!.patch).toBeNull();
+  expect(await mirador.act({ kind: "diff", racer: 1 })).toEqual({ diff: "Racer 1's changes couldn't be kept when it was deleted." });
 });
 
 test("two racers that each rank the other first make a tie, said as one, and each vote names what it ranked", async () => {
