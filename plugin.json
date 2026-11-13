@@ -2,7 +2,7 @@
   "name": "race",
   "title": "Race",
   "icon": "icon.svg",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "api": 16,
   "tellsCaller": true,
   "description": "Race a task on several agents at once, such as four of a small local model, or one on each of several profiles to compare them, each in a git worktree of its own. They share a board where they post what they learn and borrow from each other's work. The race page is a track where each racer runs from its start to the finish: its time, changes, latest note and the check Race ran in its folder. Race can check the work with hidden tests the racers never see, and a judge can score it against the task, for a podium of the best work that passed. An agent only fills in the race's form, with its advice on how to check the work; you check it and start every race. Then you take the best work, or combine the best parts, from the page, or let the conversation that started the race pick. Race also runs benchmarks: every problem of a set, such as SWE-bench Verified Mini or Aider Polyglot, on each model you choose, each racer alone and checked exactly, with a leaderboard of the models that ran on it.",
