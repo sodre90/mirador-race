@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { helpers, startHostWithThisPlugin, type TestHost } from "./mirador.ts";
@@ -76,7 +76,7 @@ test("the agent's race waits as a filled-in form for the user's Start, then star
   await test.step("the form shows what the agent asked for, and no racer starts until the user presses Start race", async () => {
     await expect(view.getByRole("heading", { name: "New race" })).toBeVisible();
     await expect(view.getByLabel("Task")).toHaveValue("FOLDER");
-    await expect(view.getByLabel("Check")).toHaveValue('echo "checked in $PWD"');
+    await expect(view.getByLabel("Check", { exact: true })).toHaveValue('echo "checked in $PWD"');
     for (const number of [1, 2]) await expect(view.getByLabel(`Racer ${number}'s profile`)).toHaveValue(profileName);
     await expect(view.getByLabel("Racer 3's profile")).toHaveCount(0);
     expect(raceBranches()).toEqual([]);
@@ -218,7 +218,11 @@ test("/race:race with nothing after it shows a form, whose race waits for the us
   await view.getByRole("button", { name: "Remove racer 3" }).click();
   await expect(view.getByRole("button", { name: /^Remove racer/ }), "a race keeps at least two racers").toHaveCount(0);
   for (const number of [1, 2]) await view.getByLabel(`Racer ${number}'s profile`).selectOption(profileName);
-  await view.getByLabel("Check").fill('echo "checked in $PWD"');
+  const hiddenDir = join(host.root, "hidden-checks");
+  mkdirSync(hiddenDir, { recursive: true });
+  writeFileSync(join(hiddenDir, "check.sh"), 'echo "checked in $PWD"\necho "hidden check"\n');
+  await view.getByLabel("Hidden check files").fill(hiddenDir);
+  await view.getByLabel("Check", { exact: true }).fill("sh check.sh");
   await view.getByRole("button", { name: "Start race" }).click();
 
   const heading = view.getByRole("heading", { name: /^Race \w+$/ });
@@ -233,8 +237,15 @@ test("/race:race with nothing after it shows a form, whose race waits for the us
   await expect(results.locator('tr[data-racer="2"]')).toContainText(/Passed in [\d.]+ s/);
   const lane = view.locator('.lane[data-racer="1"]');
   await lane.getByText(/^Check passed in [\d.]+ s$/).click();
-  await expect(lane.locator(".check pre"), "what Race's run of the user's check printed in racer 1's folder").toContainText(/^checked in \/.+\/\S+\n?$/);
+  await expect(lane.locator(".check pre"), "what Race's run of the user's check printed in racer 1's folder").toContainText(/^checked in \/.+\/\S+$/m);
+  await expect(lane.locator(".check pre"), "the check ran with the hidden check files").toContainText("hidden check");
   expect(agentSaw()).toMatch(/- Racer 1 \(racer\): finished · .* · check passed in [\d.]+ s/);
+  await expect(view.locator(".race-head .meta"), "the meta line says the check ran with hidden check files").toContainText("with hidden check files");
+  await expect(view.locator(".race-head .meta span", { hasText: "with hidden check files" })).toHaveAttribute("title", hiddenDir);
+  const decided = agentSaw().slice(agentSaw().indexOf(`Race ${raceId} is over`));
+  const folders = [...decided.matchAll(/ · folder (\S+) · /g)].map(([, folder]) => folder!);
+  expect(folders, "the captain hears both racers' folders").toHaveLength(2);
+  for (const folder of folders) expect(existsSync(join(folder, "check.sh")), "the hidden check.sh was taken back after the check").toBe(false);
 
   const podium = view.getByRole("region", { name: "Podium" });
   await expect(podium.locator(".step"), "both racers' work passed the check, so both earn a place").toHaveCount(2);

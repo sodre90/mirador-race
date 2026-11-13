@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 /** Who ranks the work when the racers have finished: nobody, or the racers' vote before the pick. */
 export type Decide = "captain" | "vote";
 
@@ -67,6 +69,8 @@ export interface Race {
   /** The profiles the racers were asked to run on, by racer number from 1. */
   profiles: string[];
   check: string | null;
+  /** A folder of check files the racers never get, copied over each racer's work just before its check; null for none. */
+  checkFiles: string | null;
   decide: Decide;
   phase: Phase;
   /** How many racers it starts. */
@@ -91,6 +95,7 @@ export interface RaceRequest {
   profiles: string[];
   size: number;
   check: string | null;
+  checkFiles: string | null;
   decide: Decide;
 }
 
@@ -125,14 +130,18 @@ export const profileOf = (profiles: string[], number: number) => profiles[(numbe
  * The race the user or the agent asked for, or why it can't be one. Racers run on `profiles` in turn, or all on
  * `profile`; there are `racers` of them, else one per profile when several are named, else DEFAULT_RACERS.
  */
-export function raceRequest(input: { task?: string; profile?: string; profiles?: string[]; racers?: number; check?: string; decide?: Decide }): RaceRequest | string {
+export function raceRequest(input: { task?: string; profile?: string; profiles?: string[]; racers?: number; check?: string; checkFiles?: string; decide?: Decide }): RaceRequest | string {
   const task = input.task?.trim() ?? "";
   const profiles = (input.profiles ?? (input.profile ? [input.profile] : [])).map((profile) => profile.trim()).filter(Boolean);
   if (!task) return "Say what the racers should do: the task.";
   if (profiles.length === 0) return "Name the profile the racers run on, or a profile for each racer.";
   const size = input.racers ?? (profiles.length >= MIN_RACERS ? profiles.length : DEFAULT_RACERS);
   if (!Number.isInteger(size) || size < MIN_RACERS || size > MAX_RACERS) return `A race has ${MIN_RACERS} to ${MAX_RACERS} racers.`;
-  return { task, profiles, size, check: input.check?.trim() || null, decide: input.decide === "vote" ? "vote" : "captain" };
+  const check = input.check?.trim() || null;
+  const checkFiles = input.checkFiles?.trim() || null;
+  if (checkFiles && !check) return "Hidden check files need a check to run them: give the check too.";
+  if (checkFiles && !isAbsolute(checkFiles)) return "Give the hidden check files' folder as a full path.";
+  return { task, profiles, size, check, checkFiles, decide: input.decide === "vote" ? "vote" : "captain" };
 }
 
 /** A race not started yet: its form, with what the user already said. */
@@ -143,6 +152,7 @@ export function blankRace(request: Partial<RaceRequest>): Race {
     task: request.task ?? "",
     profiles: request.profiles ?? [],
     check: request.check ?? null,
+    checkFiles: request.checkFiles ?? null,
     decide: request.decide ?? "captain",
     phase: "setup",
     size,
@@ -260,8 +270,9 @@ export function boardAnswer(race: Race, reader: number | null, unread: Note[], n
 
 const baseWords = (race: Race) => race.base ?? "the commit the workspace had checked out when the race started";
 
-function racerSummary(racer: Racer) {
-  const check = racer.check ? ` · check ${checkWords(racer.check)}` : "";
+function racerSummary(race: Race, racer: Racer) {
+  const hidden = race.checkFiles && racer.check ? ", with the hidden check files" : "";
+  const check = racer.check ? ` · check ${checkWords(racer.check)}${hidden}` : "";
   const said = racer.said ? `\n  It said: ${racer.said.replaceAll("\n", "\n  ")}` : "";
   return `- Racer ${racer.number} (${racer.profile}): ${racer.state} · branch ${racer.branch} · folder ${racer.folder} · ${racer.changes ?? "changes unknown"}${check}${said}`;
 }
@@ -272,13 +283,13 @@ function results(race: Race) {
   const vote = race.standings
     ? `\n\nThe racers voted: ${standingsWords(race, race.standings)}${race.votes.map(({ racer, ranking, why }) => `\n- Racer ${racer} ${rankingWords(ranking)}: ${why}`).join("")}`
     : "";
-  return `Race ${race.id} is over: ${finished.length} of ${race.racers.length} racers finished. Each worked on a branch of its own, from ${baseWords(race)}:\n${race.racers.map(racerSummary).join("\n")}${vote}`;
+  return `Race ${race.id} is over: ${finished.length} of ${race.racers.length} racers finished. Each worked on a branch of its own, from ${baseWords(race)}:\n${race.racers.map((racer) => racerSummary(race, racer)).join("\n")}${vote}`;
 }
 
 const nobodyFinished = (race: Race) => race.racers.every(({ state }) => state !== "finished");
 
 function nobodyFinishedPrompt(race: Race) {
-  return `Race ${race.id} is over, and no racer finished its work:\n${race.racers.map(racerSummary).join("\n")}\n\nTell the user, and what the racers' conversations say went wrong.`;
+  return `Race ${race.id} is over, and no racer finished its work:\n${race.racers.map((racer) => racerSummary(race, racer)).join("\n")}\n\nTell the user, and what the racers' conversations say went wrong.`;
 }
 
 const checkName = (race: Race) => (race.check ? `\`${race.check}\`` : "the project's checks");
@@ -313,7 +324,7 @@ export function pickMessage(race: Race, pick: RacePick): string {
   const racers = pick.kind === "take" ? [pick.racer] : pick.racers;
   const chosen = racers.map((number) => race.racers.find((racer) => racer.number === number && racer.state === "finished"));
   if (chosen.some((racer) => !racer)) throw new Error(`Pick among the racers that finished: ${race.racers.filter(({ state }) => state === "finished").map(({ number }) => number).join(", ")}.`);
-  const lines = (chosen as Racer[]).map(racerSummary).join("\n");
+  const lines = (chosen as Racer[]).map((racer) => racerSummary(race, racer)).join("\n");
   const from = `They started from ${baseWords(race)}.`;
   if (pick.kind === "take") {
     return `Take racer ${pick.racer}'s work from race ${race.id} into your branch:\n${lines}\n${from}\nTo take it, ${howToTake(race)}, and tell me what it said.`;

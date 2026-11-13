@@ -6,7 +6,8 @@ import { join } from "node:path";
 import host, { ITEM_TYPE } from "../host.ts";
 import type { CanvasActionContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivity, PluginItem } from "../mirador/api.ts";
 import { runCheck, CheckQueue, endLeftover, type RunningCheck } from "../check.ts";
-import { tally, type CheckResult, type Race } from "../race.ts";
+import { copyCheckFilesOver } from "../check-files.ts";
+import { raceRequest, tally, type CheckResult, type Race } from "../race.ts";
 
 let scratch: string;
 let repo: string;
@@ -670,4 +671,82 @@ test("the page shows a racer's changes as a patch, as race_peek does", async () 
 
   expect(diff).toContain("+export const answer = 42;");
   expect(await mirador.act({ kind: "diff", racer: 1 })).toEqual({ diff: "Racer 1 hasn't changed anything yet." });
+});
+
+test("`raceRequest` refuses check files without a check, or not as a full path", () => {
+  expect(raceRequest({ task: "t", profile: "p", checkFiles: "/tmp/hidden" })).toBe("Hidden check files need a check to run them: give the check too.");
+  expect(raceRequest({ task: "t", profile: "p", check: "true", checkFiles: "hidden/relative" })).toBe("Give the hidden check files' folder as a full path.");
+  expect(raceRequest({ task: "t", profile: "p", check: "true", checkFiles: "   " })).toMatchObject({ checkFiles: null });
+  expect(raceRequest({ task: "t", profile: "p", check: "true", checkFiles: " /tmp/hidden " })).toMatchObject({ check: "true", checkFiles: "/tmp/hidden" });
+});
+
+test("a race with hidden check files runs its check with them, and the racer's folder is as it was after", async () => {
+  const mirador = fakeMirador();
+  const hidden = join(scratch, "hidden");
+  await mkdir(hidden, { recursive: true });
+  writeFileSync(join(hidden, "check.sh"), "exit 0\n");
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, check: "sh check.sh", checkFiles: hidden });
+  for (const { folder } of mirador.started) writeFileSync(join(folder, "check.sh"), "exit 1\n");
+  expect(mirador.started[0]!.prompt, "the racer isn't told of the hidden check files").not.toContain(hidden);
+
+  await mirador.replied(1, finished("done"));
+  await mirador.replied(2, finished("done"));
+
+  expect(mirador.page().racers.map(({ check }) => check?.outcome)).toEqual(["passed", "passed"]);
+  for (const { folder } of mirador.started) expect(readFileSync(join(folder, "check.sh"), "utf8")).toBe("exit 1\n");
+});
+
+test("a check a restart cut short puts the racer's own files back before it copies the hidden ones again", async () => {
+  const mirador = fakeMirador();
+  const hidden = join(scratch, "hidden");
+  await mkdir(hidden, { recursive: true });
+  writeFileSync(join(hidden, "check.sh"), "echo hidden\n");
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, check: "sh check.sh", checkFiles: hidden });
+  const folder2 = mirador.started[1]!.folder;
+  writeFileSync(join(mirador.started[0]!.folder, "check.sh"), "echo own\nexit 1\n");
+  await mirador.replied(1, finished("done"));
+
+  writeFileSync(join(folder2, "check.sh"), "echo own\nexit 1\n");
+  const kept = await copyCheckFilesOver(hidden, folder2);
+  const id = mirador.page().id;
+  const keptRace = mirador.captain.storage.get(`race:${id}`) as { race: Race };
+  keptRace.race.racers[1]!.state = "checking";
+  mirador.captain.storage.set(`race:${id}`, keptRace);
+  mirador.captain.storage.set(`ownFiles:${id}:2`, kept);
+
+  await mirador.act({ kind: "resume" });
+  await until(() => mirador.page().phase === "picking", "the race over once racer 2 was checked again");
+
+  expect(readFileSync(join(folder2, "check.sh"), "utf8")).toBe("echo own\nexit 1\n");
+  expect(mirador.page().racers[1]!.check).toMatchObject({ outcome: "passed", output: "hidden\n" });
+  expect(mirador.captain.storage.get(`ownFiles:${id}:2`)).toBeUndefined();
+  expect(existsSync(kept.backup), "the cut-short check's backup is taken away").toBe(false);
+});
+
+test("a draft or a start naming a hidden check files folder that doesn't exist is refused", async () => {
+  const gone = join(scratch, "gone");
+  const notFolder = join(scratch, "afile");
+  writeFileSync(notFolder, "x");
+  const refusal = (path: string) => `There is no folder ${path} for the hidden check files.`;
+
+  const agent = fakeMirador({ caller: "agent" });
+  await expect(agent.call(agent.captain, "race", { task: "t", profile: "Qwen Flash", check: "true", checkFiles: gone })).rejects.toThrow(refusal(gone));
+
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", {});
+  await expect(mirador.act({ kind: "start", task: "t", profiles: ["Qwen Flash"], check: "true", checkFiles: gone })).rejects.toThrow(refusal(gone));
+  await expect(mirador.call(mirador.captain, "race", { task: "t", profile: "Qwen Flash", check: "true", checkFiles: gone })).rejects.toThrow(refusal(gone));
+  await expect(mirador.call(mirador.captain, "race", { task: "t", profile: "Qwen Flash", check: "true", checkFiles: notFolder })).rejects.toThrow(refusal(notFolder));
+});
+
+test("the captain hears that the check ran with the hidden check files", async () => {
+  const mirador = fakeMirador();
+  const hidden = join(scratch, "hidden");
+  await mkdir(hidden, { recursive: true });
+  writeFileSync(join(hidden, "check.sh"), "exit 0\n");
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2, check: "sh check.sh", checkFiles: hidden });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+
+  const [told] = mirador.promptsTo(mirador.captain.conversationId);
+  expect(told?.text).toMatch(/check passed in [\d.]+ s, with the hidden check files/);
 });

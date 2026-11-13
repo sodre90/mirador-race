@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import type { CanvasActionContext, CanvasHost, CanvasPluginContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivityEvent, StartedConversation } from "./mirador/api.ts";
 import { CheckQueue, endLeftover, type StartedCheck } from "./check.ts";
+import { copyCheckFilesOver, putBackOwnFiles, type KeptOwnFiles } from "./check-files.ts";
 import { changesOf, diffOf, raceBase } from "./git.ts";
 import {
   DIFF_LIMIT,
@@ -60,6 +62,7 @@ interface RaceInput {
   profiles?: string[];
   racers?: number;
   check?: string;
+  checkFiles?: string;
   decide?: Decide;
 }
 
@@ -81,6 +84,8 @@ const racerKey = (conversationId: string) => `racer:${conversationId}`;
 const readKey = (conversationId: string) => `read:${conversationId}`;
 /** A racer's running check, by its pid and start, which a restart of Mirador in place leaves running. */
 const startedCheckKey = (id: string, number: number) => `check:${id}:${number}`;
+/** What a racer's folder had before the hidden check files went over it, which a check a restart cut short leaves to put back. */
+const ownFilesKey = (id: string, number: number) => `ownFiles:${id}:${number}`;
 const RACES = "races";
 
 /** The conversations' contexts this run of Mirador has seen: the captain's to change its race page and tell it, a racer's to ask for its vote. */
@@ -223,6 +228,8 @@ async function startFromForm(form: { id: string; data: Race }, asked: RaceInput,
   if (form.data.phase !== "setup" || startingForms.has(form.data.id)) throw new Error("This race has started already.");
   const request = raceRequest(asked);
   if (typeof request === "string") throw new Error(request);
+  const problem = await checkFilesProblem(request.checkFiles);
+  if (problem) throw new Error(problem);
   startingForms.add(form.data.id);
   try {
     const race = await startRace(newRace(request, form.data.id), context, (race) => {
@@ -279,7 +286,7 @@ async function countIfAllVoted(storage: CanvasPluginStorage, id: string) {
 function racerEnded(storage: CanvasPluginStorage, conversationId: string, reply: ConversationReply) {
   const racer = keptRacer(storage, conversationId);
   if (!racer) return null;
-  let toCheck: { command: string; folder: string } | null = null;
+  let toCheck: { command: string; folder: string; checkFiles: string | null } | null = null;
   update(storage, racer.race, (race) => {
     const ended = race.racers.find(({ number }) => number === racer.number);
     if (!ended) return;
@@ -287,18 +294,30 @@ function racerEnded(storage: CanvasPluginStorage, conversationId: string, reply:
     ended.state = checks ? "checking" : reply.ended;
     ended.said = reply.text === null ? null : cut(reply.text.trim(), SAID_LIMIT);
     ended.endedAt = Date.now();
-    if (checks) toCheck = { command: race.check!, folder: ended.folder };
+    if (checks) toCheck = { command: race.check!, folder: ended.folder, checkFiles: race.checkFiles };
   });
-  return { race: racer.race, number: racer.number, toCheck: toCheck as { command: string; folder: string } | null };
+  return { race: racer.race, number: racer.number, toCheck: toCheck as { command: string; folder: string; checkFiles: string | null } | null };
 }
 
-/** Runs the race's check in the racer's folder, ending first what's left of a run of it a restart of Mirador cut short. */
-async function checkRacer(storage: CanvasPluginStorage, id: string, number: number, { command, folder }: { command: string; folder: string }) {
+/**
+ * Runs the race's check in the racer's folder, ending first what's left of a run of it a restart of Mirador cut short.
+ * The hidden check files go over the racer's work for the check, and what the racer had comes back after, even when the
+ * check is stopped or fails.
+ */
+async function checkRacer(storage: CanvasPluginStorage, id: string, number: number, { command, folder, checkFiles }: { command: string; folder: string; checkFiles: string | null }) {
   const key = startedCheckKey(id, number);
+  const ownKey = ownFilesKey(id, number);
   checksUnderWay.add(key);
+  let kept: KeptOwnFiles | undefined;
   try {
     const leftover = storage.get(key) as StartedCheck | undefined;
     if (leftover) await endLeftover(leftover);
+    if (checkFiles) {
+      const leftBehind = storage.get(ownKey) as KeptOwnFiles | undefined;
+      if (leftBehind) await putBackOwnFiles(folder, leftBehind);
+      kept = await copyCheckFilesOver(checkFiles, folder);
+      storage.set(ownKey, kept);
+    }
     const result = await checks.check(id, command, folder, (started) => storage.set(key, started));
     update(storage, id, (race) => {
       const checked = race.racers.find((racer) => racer.number === number);
@@ -307,6 +326,8 @@ async function checkRacer(storage: CanvasPluginStorage, id: string, number: numb
       checked.state = "finished";
     });
   } finally {
+    if (kept) await putBackOwnFiles(folder, kept).catch((error) => console.error(`race ${id}: racer ${number}'s own files could not be put back:`, error));
+    storage.set(ownKey, undefined);
     checksUnderWay.delete(key);
     storage.set(key, undefined);
   }
@@ -320,7 +341,7 @@ async function resumeRace(storage: CanvasPluginStorage, id: string) {
   const race = keptRace(storage, id)?.race;
   if (race?.phase !== "racing") return;
   const cutShort = race.racers.filter(({ number, state }) => state === "checking" && !checksUnderWay.has(startedCheckKey(id, number)));
-  await Promise.all(cutShort.map(({ number, folder }) => checkRacer(storage, id, number, { command: race.check!, folder })));
+  await Promise.all(cutShort.map(({ number, folder }) => checkRacer(storage, id, number, { command: race.check!, folder, checkFiles: race.checkFiles })));
   await afterTheRace(storage, id);
 }
 
@@ -391,17 +412,24 @@ function publishForm(asked: RaceInput, context: CanvasToolContext<Race>) {
   context.publish({
     type: ITEM_TYPE,
     title: "New race",
-    data: blankRace({ task: asked.task?.trim(), profiles, size: asked.racers, check: asked.check?.trim() || null, decide: asked.decide }),
+    data: blankRace({ task: asked.task?.trim(), profiles, size: asked.racers, check: asked.check?.trim() || null, checkFiles: asked.checkFiles?.trim() || null, decide: asked.decide }),
   });
 }
 
-/** What's wrong with the agent's draft that the form can't show: a missing task, or a profile Mirador doesn't have. */
-function draftProblem(asked: RaceInput, context: CanvasToolContext<Race>) {
+/** Why the hidden check files can't be used: their folder isn't one that exists. */
+async function checkFilesProblem(checkFiles: string | null): Promise<string | null> {
+  if (!checkFiles) return null;
+  const isFolder = await stat(checkFiles).then((each) => each.isDirectory(), () => false);
+  return isFolder ? null : `There is no folder ${checkFiles} for the hidden check files.`;
+}
+
+/** What's wrong with the agent's draft that the form can't show: a missing task, a profile Mirador doesn't have, or a hidden check files folder that isn't one. */
+async function draftProblem(asked: RaceInput, context: CanvasToolContext<Race>): Promise<string | null> {
   if (!asked.task?.trim()) return "Say what the racers should do: the task.";
   const known = context.profiles().map(({ name }) => name.toLowerCase());
   const unknown = [...(asked.profiles ?? []), ...(asked.profile ? [asked.profile] : [])].filter((name) => !known.includes(name.trim().toLowerCase()));
-  if (unknown.length === 0) return null;
-  return `There is no profile named ${unknown.join(", ")}. The profiles are: ${context.profiles().map(({ name }) => name).join(", ")}; or leave profiles out for the user to choose.`;
+  if (unknown.length > 0) return `There is no profile named ${unknown.join(", ")}. The profiles are: ${context.profiles().map(({ name }) => name).join(", ")}; or leave profiles out for the user to choose.`;
+  return checkFilesProblem(asked.checkFiles?.trim() || null);
 }
 
 const host: CanvasHost<Race> = {
@@ -440,13 +468,18 @@ const host: CanvasHost<Race> = {
             minLength: 1,
             description: "A command that tells whether the work is right, e.g. the project's tests; each racer runs it before it finishes, and Race runs it in each racer's folder once that racer is done.",
           },
+          checkFiles: {
+            type: "string",
+            minLength: 1,
+            description: "A folder of check files the racers never get, such as hidden tests, as a full path. Just before Race runs the check in a racer's folder, it copies them over that folder at the same paths, and afterwards it puts back what the racer had, so a racer can't pass by changing the tests it was given. Keep the folder outside the workspace's repository, or uncommitted, so the racers don't branch with it, and give a check that runs the hidden files, e.g. the project's whole test suite.",
+          },
           decide: { type: "string", enum: ["captain", "vote"], description: "captain (the default): the pick comes as soon as they finish. vote: the racers first rank each other's work." },
         },
       },
       async run(input, context) {
         const asked = input as RaceInput;
         if (context.caller === "agent") {
-          const problem = draftProblem(asked, context);
+          const problem = await draftProblem(asked, context);
           if (problem) throw new Error(problem);
           publishForm(asked, context);
           return DRAFTED;
@@ -456,6 +489,8 @@ const host: CanvasHost<Race> = {
           publishForm(asked, context);
           return "Fill in the race on the canvas, then press Start race.";
         }
+        const problem = await checkFilesProblem(request.checkFiles);
+        if (problem) throw new Error(problem);
         const race = await startRace(newRace(request), context, (race) => context.publish({ type: ITEM_TYPE, title: raceTitle(race.task), data: race }).id);
         const racers = race.racers.map(({ number, profile, branch }) => `racer ${number} on ${profile}, branch ${branch}`).join("; ");
         return `Race ${race.id} started: ${race.racers.length} racers, each in a worktree of its own (${racers}). They share a board you can read with race_board, and post to, to steer them. When all have finished, you pick the work to take on the race page.`;

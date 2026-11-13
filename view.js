@@ -589,6 +589,7 @@ function task(race) {
 function header(race) {
   const profiles = [...new Set(race.racers.map((racer) => racerProfile(race, racer)))].filter(Boolean);
   const check = race.check ? el("span", {}, " · check ", el("code", { title: race.check, text: race.check })) : null;
+  const hidden = race.checkFiles ? el("span", { title: race.checkFiles, text: " · with hidden check files" }) : null;
   const decide = race.decide === "vote" ? "racers vote first" : "no vote";
   return el(
     "header",
@@ -600,6 +601,7 @@ function header(race) {
       el("span", { class: `phase phase-${race.phase}`, text: PHASE_WORDS[race.phase] ?? race.phase }),
       ` · ${plural(race.size, "racer", "racers")} on ${profiles.join(", ") || "…"} · ${decide}`,
       check,
+      hidden,
     ),
     task(race),
   );
@@ -623,6 +625,7 @@ function formOf(race) {
       task: race.task ?? "",
       profiles: Array.from({ length: size }, (_, index) => race.profiles?.[index % Math.max(1, race.profiles.length)] ?? ""),
       check: race.check ?? "",
+      checkFiles: race.checkFiles ?? "",
       vote: race.decide === "vote",
     };
   }
@@ -674,7 +677,7 @@ function formView(race) {
       start.disabled = true;
       problem.textContent = "";
       try {
-        await window.mirador.send({ kind: "start", task: form.task, profiles: form.profiles, check: form.check, decide: form.vote ? "vote" : "captain" });
+        await window.mirador.send({ kind: "start", task: form.task, profiles: form.profiles, check: form.check, checkFiles: form.checkFiles, decide: form.vote ? "vote" : "captain" });
       } catch (error) {
         problem.textContent = error.message;
         start.disabled = false;
@@ -707,6 +710,7 @@ function formView(race) {
           : null,
       ),
       el("label", {}, "Check (optional)", el("input", { type: "text", "aria-label": "Check", placeholder: "e.g. bun test", value: form.check, oninput: (event) => (form.check = event.target.value) })),
+      el("label", {}, "Hidden check files (optional)", el("input", { type: "text", "aria-label": "Hidden check files", placeholder: "A folder the racers never get, e.g. /tmp/race-checks: copied over each racer's work before the check", value: form.checkFiles, oninput: (event) => (form.checkFiles = event.target.value) })),
       el("label", { class: "row" }, el("input", { type: "checkbox", checked: form.vote, onchange: (event) => (form.vote = event.target.checked) }), "The racers rank each other's work before I pick"),
       el("div", { class: "row" }, start, problem),
     ),

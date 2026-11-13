@@ -207,7 +207,7 @@ test("screenshots of a race", async ({ page }) => {
   await helpers().untilFramePainted(page, page.locator(".canvas-panel:visible .canvas-body > .canvas-frame.plugin iframe"));
   await view.getByLabel("Task").fill(task);
   for (const [index, profile] of racerProfiles.entries()) await view.getByLabel(`Racer ${index + 1}'s profile`).selectOption(profile);
-  await view.getByLabel("Check").fill("bun test");
+  await view.getByLabel("Check", { exact: true }).fill("bun test");
   await view.getByRole("checkbox", { name: "The racers rank each other's work before I pick" }).check();
   await page.mouse.move(0, 0);
   await takeScreenshot(page, "race-form", page.locator(".canvas-panel:visible"), { downTo: view.getByRole("button", { name: "Start race" }) });
