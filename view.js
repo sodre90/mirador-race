@@ -646,11 +646,14 @@ function loadProfiles(race) {
   );
 }
 
+/** A profile as the form offers it: its name, the model it sets, else its agent, and the effort it sets: "Work · Opus 5.5 · high". */
+const profileLabel = ({ name, agent, model, effort }) => [name, model?.name ?? agent, effort].filter(Boolean).join(" · ");
+
 function formView(race) {
   loadProfiles(race);
   const form = formOf(race);
   const problem = el("p", { class: "problem", role: "alert" });
-  const options = (chosen) => shown.profiles.map(({ name, agent }) => el("option", { value: name, selected: name === chosen, text: `${name} · ${agent}` }));
+  const options = (chosen) => shown.profiles.map((profile) => el("option", { value: profile.name, selected: profile.name === chosen, text: profileLabel(profile) }));
   const racerRows = form.profiles.map((profile, index) =>
     el(
       "div",

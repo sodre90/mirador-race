@@ -33,8 +33,8 @@ afterEach(() => rm(scratch, { recursive: true, force: true }));
 type Context = CanvasToolContext<Race> & CanvasActionContext<Race>;
 
 const PROFILES = [
-  { name: "Qwen Flash", agent: "opencode" },
-  { name: "Kimi", agent: "claude" },
+  { name: "Qwen Flash", agent: "opencode", model: null, effort: null },
+  { name: "Kimi", agent: "claude", model: { id: "opus", name: "Kimi K3" }, effort: "high" },
 ];
 
 /** Mirador as the plugin sees it: one storage, the items of each conversation, and conversations started in real worktrees of the repo. */

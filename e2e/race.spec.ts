@@ -193,8 +193,22 @@ test("Stop race on the race page stops the racers still working, and the captain
   expect(agentSaw()).not.toContain(`Race ${raceId} is over`);
 });
 
+/** Saved as Mirador's profile editor saves it, with a model the editor only offers once the agent has listed it. */
+async function saveProfileWithModel(page: Page, name: string, model: string, effort: string) {
+  await page.evaluate(
+    (profile) =>
+      new Promise((resolve) => {
+        const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws`);
+        socket.onopen = () => socket.send(JSON.stringify({ type: "profile.save", requestId: "save-model", profile }));
+        socket.onmessage = ({ data }) => JSON.parse(String(data)).type === "profile.saved" && resolve(socket.close());
+      }),
+    { name, harness: "opencode", environment: "", prelaunch: "", model, mode: null, effort, bypassPermissions: false, askMode: "wait", color: null },
+  );
+}
+
 test("/race:race with nothing after it shows a form, whose race waits for the user's pick, which goes to the captain as their message", async ({ page }) => {
   await helpers().signIn(page, host);
+  await saveProfileWithModel(page, "thorough", "opus", "high");
   await page.goto(`${host.origin}/#/c/${captainId}`);
   const composer = page.locator(".composer:visible textarea");
   await composer.fill("/race:race");
@@ -205,7 +219,7 @@ test("/race:race with nothing after it shows a form, whose race waits for the us
 
   const view = helpers().walkthroughView(page);
   await expect(view.getByRole("heading", { name: "New race" })).toBeVisible();
-  await expect(view.getByLabel("Racer 1's profile").locator("option", { hasText: `${profileName} · opencode` })).toHaveCount(1);
+  for (const label of [`${profileName} · opencode`, "thorough · opus · high"]) await expect(view.getByLabel("Racer 1's profile").locator("option", { hasText: label })).toHaveCount(1);
   await helpers().untilFramePainted(page, raceFrame(page));
   await view.getByRole("button", { name: "Start race" }).click();
   await expect(view.getByRole("alert")).toHaveText("Say what the racers should do: the task.");
