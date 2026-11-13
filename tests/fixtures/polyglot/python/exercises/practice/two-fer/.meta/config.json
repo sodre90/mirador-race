@@ -1,0 +1,7 @@
+{
+  "files": {
+    "solution": ["two_fer.py"],
+    "test": ["two_fer_test.py"],
+    "example": [".meta/example.py"]
+  }
+}

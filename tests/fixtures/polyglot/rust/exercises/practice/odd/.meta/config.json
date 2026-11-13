@@ -1,0 +1,7 @@
+{
+  "files": {
+    "solution": ["src/lib.rs"],
+    "test": ["tests/odd.rs"],
+    "example": [".meta/example.rs", ".meta/other.rs"]
+  }
+}
