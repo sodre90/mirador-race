@@ -925,7 +925,7 @@ function draw(race) {
 }
 
 /** What the bench page holds that the run doesn't: the form's answers, the set and profiles it asked for, the open cell and its patch. */
-const shownBench = { form: null, set: null, profiles: null, open: null, diffs: new Map(), resumeAsked: false, leaderboard: null };
+const shownBench = { form: null, set: null, profiles: null, open: null, diffs: new Map(), resumeAsked: false, leaderboard: null, leaderboardOf: null };
 
 const MAX_COLUMNS = 6;
 const MAX_ATTEMPTS = 5;
@@ -1017,6 +1017,7 @@ const changeWords = (change) => {
 /** The set's models ranked by the problems they passed, from the runs kept in its runs/ folder; a row of other problems greys out. */
 function leaderboardView() {
   const rows = shownBench.leaderboard;
+  if (rows === null) return null;
   const heading = el("h2", { text: "Leaderboard" });
   if (rows.length === 0) return el("section", {}, heading, el("p", { class: "empty", text: "No runs of this set yet." }));
   const columns = ["Model", "Runs", "Passed", "Pass rate", "Change", "Median time", "Tokens", "Cost"];
@@ -1076,11 +1077,16 @@ function loadBenchProfiles(run) {
   );
 }
 
-function loadLeaderboard() {
-  if (shownBench.leaderboard) return;
-  shownBench.leaderboard = [];
+/** Reads the leaderboard on the form, and again once the run is over, so it counts the run that just ended. */
+function loadLeaderboard(run) {
+  const over = ["done", "stopped"].includes(run.phase);
+  const wanted = run.phase === "setup" ? "setup" : over ? "over" : null;
+  if (wanted === null || shownBench.leaderboardOf === wanted) return;
+  shownBench.leaderboardOf = wanted;
+  shownBench.leaderboard = null;
   window.mirador.send({ kind: "leaderboard" }).then(
     (rows) => {
+      if (shownBench.leaderboardOf !== wanted) return;
       shownBench.leaderboard = rows;
       drawBench(lastBench);
     },
@@ -1393,7 +1399,7 @@ function resumeBench(run) {
 
 function drawBench(run) {
   resumeBench(run);
-  loadLeaderboard();
+  loadLeaderboard(run);
   const sections = run.phase === "setup" ? benchFormView(run) : benchRunView(run);
   page.replaceChildren(...sections.flat().filter(Boolean));
   lastBench = run;

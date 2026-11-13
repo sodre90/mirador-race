@@ -570,6 +570,13 @@ async function keptResults(folder: string): Promise<ResultsFile[]> {
   return results;
 }
 
+/** The set's kept results, with the page's own run once it is over: its file is written after its phase changes, so a page can ask before it exists. */
+async function resultsWithOwnRun(run: BenchRun): Promise<ResultsFile[]> {
+  const results = await keptResults(run.set.folder);
+  const over = run.phase === "done" || run.phase === "stopped";
+  return over && !results.some((kept) => kept.run === run.id) ? [...results, resultsFileOf(run)] : results;
+}
+
 export async function benchAction(item: PluginItem<BenchRun>, action: unknown, context: CanvasActionContext) {
   runCaptains.set(context.conversationId, context);
   const asked = action as BenchPageAction;
@@ -586,7 +593,7 @@ export async function benchAction(item: PluginItem<BenchRun>, action: unknown, c
     return { resuming: true };
   }
   if (asked.kind === "diff") return { diff: await cellWork(context.storage, item.data.id, asked.cell) };
-  if (asked.kind === "leaderboard") return leaderboardOf(await keptResults(item.data.set.folder));
+  if (asked.kind === "leaderboard") return leaderboardOf(await resultsWithOwnRun(item.data));
   throw new Error("A run's page starts and stops its run and shows a racer's changes.");
 }
 

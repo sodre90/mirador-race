@@ -155,6 +155,8 @@ test("Stop run stops it", async ({ page }) => {
   await expect(matrix.locator('button[data-cell="0"]')).toContainText("stopped");
   await expect(view.locator(".race-head .phase")).toHaveText("Stopped");
   await expect(view.getByRole("button", { name: "Stop run" })).toHaveCount(0);
+  const runsOfRacer = view.getByRole("table", { name: "Leaderboard" }).locator("tbody tr", { hasText: "racer" }).locator("td").nth(1);
+  await expect(runsOfRacer, "the run that just stopped counts on the page that watched it").toHaveText("2");
 });
 
 test("The leaderboard shows the set's runs, on the run page and on the form", async ({ page }) => {

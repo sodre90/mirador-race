@@ -746,3 +746,20 @@ test("the leaderboard action reads the set's results files, skipping strays, on 
   expect(rows).toHaveLength(1);
   expect(rows[0]).toMatchObject({ label: "Kimi", runs: 2, passed: 0, done: 1, passRate: 0, change: -1, sameProblems: true });
 });
+
+test("the leaderboard of an ended run counts the run once, before its results file is written and after", async () => {
+  await makeSet(repo, ["answer"]);
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  await until(() => mirador.started.length === 1, "the racer started");
+  writeFileSync(join(mirador.started[0]!.folder, "answer.txt"), "42\n");
+  await mirador.replied(1, finished("done"));
+  expect(mirador.page().phase).toBe("done");
+  const written = (await mirador.act({ kind: "leaderboard" })) as LeaderboardRow[];
+  expect(written).toEqual([expect.objectContaining({ label: "Kimi", runs: 1, passed: 1 })]);
+
+  await rm(join(repo, "runs"), { recursive: true });
+  const notYetWritten = (await mirador.act({ kind: "leaderboard" })) as LeaderboardRow[];
+
+  expect(notYetWritten).toEqual(written);
+});
