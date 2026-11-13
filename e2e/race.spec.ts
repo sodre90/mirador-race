@@ -203,7 +203,7 @@ async function saveProfileWithModel(page: Page, name: string, model: string, eff
         socket.onopen = () => socket.send(JSON.stringify({ type: "profile.save", requestId: "save-model", profile }));
         socket.onmessage = ({ data }) => JSON.parse(String(data)).type === "profile.saved" && resolve(socket.close());
       }),
-    { name, harness: "opencode", environment: "", prelaunch: "", model, mode: null, effort, bypassPermissions: false, askMode: "wait", color: null },
+    { name, harness: "opencode", environment: "", prelaunch: "", model, mode: null, effort, bypassPermissions: false, askMode: "wait", color: null, pluginsOff: [] },
   );
 }
 
