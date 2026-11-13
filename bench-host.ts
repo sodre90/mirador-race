@@ -2,8 +2,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CanvasActionContext, CanvasPluginContext, CanvasPluginStorage, CanvasTool, ConversationReply, PluginActivityEvent, PluginItem, PluginItemType, PluginProfile, StartedConversation, ToolCaller } from "./mirador/api.ts";
-import { cellsOf, cellsToStart, columnLabel, leaderboardOf, MAX_ATTEMPTS, MAX_AT_ONCE, newRunId, resultOf, resultsFileOf, retryPrompt, runSummary, type BenchCell, type BenchColumn, type BenchRun, type CellResult, type ResultsFile } from "./bench.ts";
+import { cellsOf, cellsToStart, columnLabel, leaderboardOf, MAX_ATTEMPTS, MAX_AT_ONCE, newRunId, resultOf, resultsFileOf, retryPrompt, runSummary, type BenchCell, type BenchColumn, type BenchContainer, type BenchRun, type CellResult, type ResultsFile } from "./bench.ts";
 import { checks, endLeftover, type StartedCheck } from "./check.ts";
+import { containerCommand } from "./container.ts";
 import { copyCheckFiles, loadSet, validateProblem, type LoadedSet, type Problem, type ProblemValidation } from "./sets.ts";
 import { diffOf } from "./git.ts";
 import { DIFF_LIMIT, type CheckResult } from "./race.ts";
@@ -349,14 +350,15 @@ async function cellDone(storage: CanvasPluginStorage, id: string, index: number,
  * Runs the problem's check in the racer's folder, ending first what's left of a run of it a restart of Mirador cut short.
  * Null when the check couldn't run at all, such as with the set's check files gone: the cell then ends as failed.
  */
-async function runBenchCheck(storage: CanvasPluginStorage, id: string, index: number, { problem, folder, timeoutMs }: { problem: Problem; folder: string; timeoutMs: number }): Promise<CheckResult | null> {
+async function runBenchCheck(storage: CanvasPluginStorage, id: string, index: number, { problem, folder, timeoutMs, container }: { problem: Problem; folder: string; timeoutMs: number; container?: BenchContainer }): Promise<CheckResult | null> {
   const key = benchCheckKey(id, index);
   checksUnderWay.add(key);
   try {
     const leftover = storage.get(key) as StartedCheck | undefined;
     if (leftover) await endLeftover(leftover);
-    await copyCheckFiles(problem, folder);
-    return await checks.check(id, problem.check, folder, (started) => storage.set(key, started), { timeoutMs });
+    const command = container ? containerCommand(container, problem.checkFiles, problem.check, folder) : problem.check;
+    if (!container) await copyCheckFiles(problem, folder);
+    return await checks.check(id, command, folder, (started) => storage.set(key, started), { timeoutMs });
   } catch (error) {
     await cellDone(storage, id, index, "failed", `Race couldn't run the check: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -375,7 +377,7 @@ async function checkCell(storage: CanvasPluginStorage, id: string, index: number
   updateRun(storage, id, (run) => (run.cells[index]!.state = "checking"));
   const set = await setOf(kept.run);
   const problem = set.problems.find(({ id: problemId }) => problemId === cell.problem)!;
-  const check = await runBenchCheck(storage, id, index, { problem, folder: cell.folder!, timeoutMs: kept.run.settings.checkTimeoutMinutes * 60_000 });
+  const check = await runBenchCheck(storage, id, index, { problem, folder: cell.folder!, timeoutMs: kept.run.settings.checkTimeoutMinutes * 60_000, container: set.settings.container });
   if (check === null) return;
   updateRun(storage, id, (run) => run.cells[index]!.tries.push({ check, endedAt: Date.now() }));
   const run = keptRun(storage, id)!.run;

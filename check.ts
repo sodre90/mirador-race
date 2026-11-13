@@ -59,7 +59,7 @@ export function runCheck(command: string, folder: string, { timeoutMs = CHECK_TI
   const tail = new OutputTail(outputLimit);
   let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
-    child = Bun.spawn([process.env.SHELL || "/bin/sh", "-lc", command], { cwd: folder, detached: true, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    child = Bun.spawn([process.env.SHELL || "/bin/sh", "-lc", command], { cwd: folder, detached: true, stdin: "ignore", stdout: "pipe", stderr: "pipe", env: process.env });
   } catch (error) {
     return failedToStart(error);
   }

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { problemSpecOf, settingsOf, type BenchSettings, type ProblemSpec } from "./bench.ts";
 import { runCheck, type RunningCheck } from "./check.ts";
+import { runContainerCheck } from "./container.ts";
 
 /** A problem id a race can be kept under: lower-case letters, digits and dashes, at most 40, starting with a letter or digit. */
 export const isProblemId = (id: string) => /^[a-z0-9][a-z0-9-]{0,39}$/.test(id);
@@ -116,17 +117,21 @@ export async function validateProblem(
   const temp = await mkdtemp(join(tmpdir(), "mirador-race-set-"));
   const scratch = join(temp, "worktree");
   const timeoutMs = set.settings.checkTimeoutMinutes * 60_000;
+  const container = set.settings.container;
+  const checkHere = container
+    ? (command: string, folder: string, options: { timeoutMs: number }) => runContainerCheck(container, problem.checkFiles, command, folder, options)
+    : check;
   const said = (validation: Validation, output: string): ProblemValidation => ({ problem: problem.id, validation, output });
   try {
     await mustGit(set.folder, ["worktree", "add", "--detach", "--quiet", scratch, problem.start]);
-    await copyCheckFiles(problem, scratch);
-    const onStart = await check(problem.check, scratch, { timeoutMs }).result;
+    if (!container) await copyCheckFiles(problem, scratch);
+    const onStart = await checkHere(problem.check, scratch, { timeoutMs }).result;
     if (onStart.outcome === "passed") return said("passes on its start", onStart.output);
     if (onStart.outcome === "timed out" || onStart.outcome === "stopped") return said("couldn't check", onStart.output);
     if (problem.referenceFiles === null) return said("no reference", "");
     await copyReferenceFiles(problem, scratch);
-    await copyCheckFiles(problem, scratch);
-    const withReference = await check(problem.check, scratch, { timeoutMs }).result;
+    if (!container) await copyCheckFiles(problem, scratch);
+    const withReference = await checkHere(problem.check, scratch, { timeoutMs }).result;
     return withReference.outcome === "passed" ? said("valid", withReference.output) : said("fails with its reference", withReference.output);
   } finally {
     await git(set.folder, ["worktree", "remove", "--force", scratch]);

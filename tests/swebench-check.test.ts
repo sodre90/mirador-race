@@ -1,0 +1,178 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SWEBENCH_CHECK } from "../scripts/import-swebench.ts";
+
+const FAKE_UVX = `#!/bin/sh
+printf '%s\\0' "$@" > "$FAKE_UVX_ARGS"
+pwd > "$FAKE_UVX_CWD"
+prev=""
+for arg; do
+  case "$prev" in
+    --predictions_path) cp "$arg" "$FAKE_UVX_PREDICTIONS" ;;
+    --run_id) run_id="$arg" ;;
+    --instance_ids) instance_id="$arg" ;;
+  esac
+  prev="$arg"
+done
+logs="logs/run_evaluation/$run_id/race/$instance_id"
+mkdir -p "$logs"
+if [ "$FAKE_UVX_NO_REPORT" = "1" ]; then
+  printf 'building the instance image\\nimage pull denied\\n' > "$logs/run_instance.log"
+  exit "\${FAKE_UVX_EXIT:-1}"
+fi
+if [ "$FAKE_UVX_RESOLVED" = "1" ]; then resolved=true; else resolved=false; fi
+printf '{\\n    "%s": {\\n        "patch_exists": true,\\n        "resolved": %s\\n    }\\n}\\n' "$instance_id" "$resolved" > "$logs/report.json"
+printf 'line one of test output\\nFAIL tests/test_calc.py::test_combine\\n' > "$logs/test_output.txt"
+exit "\${FAKE_UVX_EXIT:-0}"
+`;
+
+const TOOLS = ["git", "mktemp", "cp", "sed", "awk", "grep", "tail", "rm", "basename", "mkdir"];
+
+let scratch: string;
+let bin: string;
+let folder: string;
+let baseCommit: string;
+const instanceId = "demo__alpha-1";
+
+async function git(args: string[]) {
+  const child = Bun.spawn(["git", "-C", folder, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+  if (exitCode !== 0) throw new Error(`git ${args.join(" ")} failed`);
+  return stdout;
+}
+
+async function makeBin(withUvx: boolean) {
+  const dir = join(scratch, withUvx ? "bin" : "bin-without-uvx");
+  await mkdir(dir);
+  await Promise.all(
+    TOOLS.map(async (tool) => {
+      const real = Bun.which(tool);
+      if (!real) throw new Error(`${tool} isn't on this machine's PATH`);
+      await symlink(real, join(dir, tool));
+    }),
+  );
+  if (withUvx) {
+    const uvx = join(dir, "uvx");
+    await writeFile(uvx, FAKE_UVX);
+    await chmod(uvx, 0o755);
+  }
+  return dir;
+}
+
+/** The racer's folder: a base commit, a changed file with quotes, backslashes and a tab, a new file, and the check script. */
+async function makeRacer() {
+  folder = join(scratch, "racer");
+  await mkdir(folder);
+  await git(["-c", "init.defaultBranch=main", "init", "-q"]);
+  await writeFile(join(folder, "calc.py"), "def combine(a, b):\n    return a + b\n");
+  await git(["add", "-A"]);
+  await git(["commit", "-qm", "base"]);
+  baseCommit = (await git(["rev-parse", "HEAD"])).trim();
+  await writeFile(join(folder, "calc.py"), 'def combine(a, b):\n    # say "a - b", keep C:\\temp\tin mind\n    return a - b\n');
+  await writeFile(join(folder, "new_file.py"), "answer = 42\n");
+  await writeFile(join(folder, "swebench-check.sh"), SWEBENCH_CHECK);
+  await git(["add", "calc.py"]);
+}
+
+async function runCheckScript({ resolved = true, noReport = false, uvxExit }: { resolved?: boolean; noReport?: boolean; uvxExit?: number } = {}) {
+  const env = {
+    ...process.env,
+    PATH: bin,
+    FAKE_UVX_ARGS: join(scratch, "uvx-args"),
+    FAKE_UVX_CWD: join(scratch, "uvx-cwd"),
+    FAKE_UVX_PREDICTIONS: join(scratch, "predictions.json"),
+    FAKE_UVX_RESOLVED: resolved ? "1" : "0",
+    FAKE_UVX_NO_REPORT: noReport ? "1" : "0",
+    ...(uvxExit === undefined ? {} : { FAKE_UVX_EXIT: String(uvxExit) }),
+  };
+  const child = Bun.spawn(["/bin/sh", "swebench-check.sh", instanceId, baseCommit], { cwd: folder, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  return { stdout, stderr, exitCode };
+}
+
+const recordedArgs = () => readFile(join(scratch, "uvx-args"), "utf8").then((text) => text.split("\0").slice(0, -1));
+const predictions = async () => JSON.parse(await readFile(join(scratch, "predictions.json"), "utf8")) as { instance_id: string; model_name_or_path: string; model_patch: string }[];
+
+beforeEach(async () => {
+  scratch = await realpath(await mkdtemp(join(tmpdir(), "swebench-check-test-")));
+  bin = await makeBin(true);
+  await makeRacer();
+});
+afterEach(() => rm(scratch, { recursive: true, force: true }));
+
+test("the racer's diff becomes the prediction, new files in and the check script out, without touching the racer's index", async () => {
+  const { exitCode, stdout, stderr } = await runCheckScript();
+
+  expect(stderr).toBe("");
+  expect(exitCode, stdout).toBe(0);
+  const [prediction] = await predictions();
+  expect(prediction!.instance_id).toBe(instanceId);
+  expect(prediction!.model_name_or_path).toBe("race");
+  expect(prediction!.model_patch).toContain("-    return a + b");
+  expect(prediction!.model_patch).toContain("+    return a - b");
+  expect(prediction!.model_patch).toContain('say "a - b", keep C:\\temp\tin mind');
+  expect(prediction!.model_patch).toContain("+++ b/new_file.py");
+  expect(prediction!.model_patch).toContain("+answer = 42");
+  expect(prediction!.model_patch).not.toContain("swebench-check.sh");
+
+  const args = await recordedArgs();
+  expect(args.slice(0, 4)).toEqual(["--python", "3.12", "--from", "swebench==4.1.0"]);
+  expect(args).toContain("python");
+  expect(args).toContain("-m");
+  expect(args).toContain("swebench.harness.run_evaluation");
+  const valueAfter = (flag: string) => args[args.indexOf(flag) + 1];
+  expect(valueAfter("--dataset_name")).toBe("MariusHobbhahn/swe-bench-verified-mini");
+  expect(valueAfter("--split")).toBe("test");
+  expect(valueAfter("--instance_ids")).toBe(instanceId);
+  expect(valueAfter("--max_workers")).toBe("1");
+  expect(valueAfter("--cache_level")).toBe("env");
+  expect(valueAfter("--clean")).toBe("True");
+  expect(valueAfter("--run_id")).toBeTruthy();
+
+  expect((await git(["diff", "--cached", "--name-only"])).trim(), "the racer's staging stays as it was").toBe("calc.py");
+  expect(await git(["status", "--porcelain"])).toBe("M  calc.py\n?? new_file.py\n?? swebench-check.sh\n");
+  expect(existsSync((await readFile(join(scratch, "uvx-cwd"), "utf8")).trim()), "the check's temp folder is gone").toBe(false);
+});
+
+test("a resolved instance passes, and an unresolved one fails with the tail of the test output", async () => {
+  const passed = await runCheckScript({ resolved: true });
+  expect(passed.exitCode).toBe(0);
+
+  const failed = await runCheckScript({ resolved: false });
+  expect(failed.exitCode).toBe(1);
+  expect(failed.stdout).toContain(`SWE-bench did not mark ${instanceId} resolved`);
+  expect(failed.stdout).toContain("FAIL tests/test_calc.py::test_combine");
+  expect(existsSync((await readFile(join(scratch, "uvx-cwd"), "utf8")).trim()), "the temp folder is gone after a failure too").toBe(false);
+});
+
+test("a harness that leaves no report fails with the tail of the instance log", async () => {
+  const { exitCode, stdout } = await runCheckScript({ noReport: true, uvxExit: 1 });
+
+  expect(exitCode).toBe(1);
+  expect(stdout).toContain("the harness exited with 1");
+  expect(stdout).toContain("image pull denied");
+});
+
+test("without uvx it says so, and how to install uv", async () => {
+  bin = await makeBin(false);
+
+  const { exitCode, stdout } = await runCheckScript();
+
+  expect(exitCode).toBe(1);
+  expect(stdout).toContain("uvx isn't installed");
+  expect(stdout).toContain("https://astral.sh/uv/install.sh");
+});
+
+test("a racer that changed nothing fails without running the harness", async () => {
+  await writeFile(join(folder, "calc.py"), "def combine(a, b):\n    return a + b\n");
+  await rm(join(folder, "new_file.py"));
+
+  const { exitCode, stdout } = await runCheckScript();
+
+  expect(exitCode).toBe(1);
+  expect(stdout).toContain("No changes against");
+  expect(existsSync(join(scratch, "uvx-args")), "the harness never ran").toBe(false);
+});

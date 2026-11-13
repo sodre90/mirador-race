@@ -2,12 +2,23 @@ import type { RanOn } from "./mirador/api.ts";
 import type { CheckResult } from "./race.ts";
 import type { ProblemValidation } from "./sets.ts";
 
+/** set.json's container: the checks run in a fresh container of the image, on this machine or over ssh. */
+export interface BenchContainer {
+  image: string;
+  workdir: string;
+  /** An ssh host the checks run on; this machine when absent. */
+  host?: string;
+  /** docker on this machine, podman over ssh, unless the set says otherwise. */
+  engine: "docker" | "podman";
+}
+
 /** set.json: how a problem set's runs go. */
 export interface BenchSettings {
   name: string;
   checkTimeoutMinutes: number;
   agentTimeLimitMinutes: number;
   tries: 1 | 2;
+  container?: BenchContainer;
 }
 
 export const DEFAULT_SETTINGS: Omit<BenchSettings, "name"> = { checkTimeoutMinutes: 3, agentTimeLimitMinutes: 30, tries: 2 };
@@ -101,15 +112,33 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
 const isMinutes = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
 const isTries = (value: unknown): value is 1 | 2 => value === 1 || value === 2;
 
+/** set.json's container, or why it can't be read; the engine defaults to docker here and podman over ssh. */
+function containerOf(value: unknown): BenchContainer | string {
+  if (!isObject(value)) return "set.json's container must hold an object.";
+  const { image, workdir, host, engine } = value;
+  if (typeof image !== "string" || image.length === 0) return "set.json's container.image must be a non-empty string.";
+  if (typeof workdir !== "string" || !workdir.startsWith("/")) return "set.json's container.workdir must be a full path in the container, such as /testbed.";
+  if (host !== undefined && (typeof host !== "string" || host.length === 0)) return "set.json's container.host must be a non-empty string, or left out for this machine.";
+  if (engine !== undefined && engine !== "docker" && engine !== "podman") return "set.json's container.engine must be docker or podman.";
+  return {
+    image,
+    workdir,
+    ...(host === undefined ? {} : { host }),
+    engine: engine === "docker" || engine === "podman" ? engine : host ? "podman" : "docker",
+  };
+}
+
 /** set.json's settings, or why they can't be read. */
 export function settingsOf(json: unknown, folderName: string): BenchSettings | string {
   if (!isObject(json)) return "set.json must hold an object.";
-  const { name = folderName, checkTimeoutMinutes = DEFAULT_SETTINGS.checkTimeoutMinutes, agentTimeLimitMinutes = DEFAULT_SETTINGS.agentTimeLimitMinutes, tries = DEFAULT_SETTINGS.tries } = json;
+  const { name = folderName, checkTimeoutMinutes = DEFAULT_SETTINGS.checkTimeoutMinutes, agentTimeLimitMinutes = DEFAULT_SETTINGS.agentTimeLimitMinutes, tries = DEFAULT_SETTINGS.tries, container } = json;
   if (typeof name !== "string" || name.length === 0) return "set.json's name must be a non-empty string.";
   if (!isMinutes(checkTimeoutMinutes)) return "set.json's checkTimeoutMinutes must be a number of minutes above 0.";
   if (!isMinutes(agentTimeLimitMinutes)) return "set.json's agentTimeLimitMinutes must be a number of minutes above 0.";
   if (!isTries(tries)) return "set.json's tries must be 1 or 2.";
-  return { name, checkTimeoutMinutes, agentTimeLimitMinutes, tries };
+  const containerSettings = container === undefined ? undefined : containerOf(container);
+  if (typeof containerSettings === "string") return containerSettings;
+  return { name, checkTimeoutMinutes, agentTimeLimitMinutes, tries, ...(containerSettings === undefined ? {} : { container: containerSettings }) };
 }
 
 /** problem.json's spec, or why it can't be read. */

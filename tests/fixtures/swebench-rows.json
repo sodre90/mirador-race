@@ -1,0 +1,44 @@
+{
+  "features": [],
+  "rows": [
+    {
+      "row_idx": 0,
+      "row": {
+        "repo": "demo/alpha",
+        "instance_id": "demo__alpha-1",
+        "base_commit": "",
+        "patch": "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1,2 +1,2 @@\n def combine(a, b):\n-    return a + b\n+    return a - b\ndiff --git a/helper.py b/helper.py\nnew file mode 100644\n--- /dev/null\n+++ b/helper.py\n@@ -0,0 +1,2 @@\n+def hint():\n+    return \"subtract\"\n",
+        "test_patch": "diff --git a/tests/test_calc.py b/tests/test_calc.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_calc.py\n@@ -0,0 +1,2 @@\n+def test_combine():\n+    assert combine(5, 3) == 2\n",
+        "problem_statement": "The calculator adds when it should subtract.\n\n`combine(a, b)` in `calc.py` returns `a + b`, but the issue asks for `a - b`.",
+        "hints_text": "",
+        "created_at": "2024-01-01T00:00:00Z",
+        "version": "1.0",
+        "FAIL_TO_PASS": "[\"tests/test_calc.py::test_combine\"]",
+        "PASS_TO_PASS": "[]",
+        "environment_setup_commit": ""
+      },
+      "truncated_cells": []
+    },
+    {
+      "row_idx": 1,
+      "row": {
+        "repo": "demo/beta",
+        "instance_id": "demo__beta-2",
+        "base_commit": "",
+        "patch": "diff --git a/lib/util.py b/lib/util.py\n--- a/lib/util.py\n+++ b/lib/util.py\n@@ -1,2 +1,2 @@\n def greet(name):\n-    return \"hello\"\n+    return \"hello \" + name\n",
+        "test_patch": "diff --git a/tests/test_util.py b/tests/test_util.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_util.py\n@@ -0,0 +1,2 @@\n+def test_greet():\n+    assert greet(\"ann\") == \"hello ann\"\n",
+        "problem_statement": "The greeting forgets the name.\n\n`greet(name)` in `lib/util.py` returns `hello` without the name.",
+        "hints_text": "",
+        "created_at": "2024-01-02T00:00:00Z",
+        "version": "1.0",
+        "FAIL_TO_PASS": "[\"tests/test_util.py::test_greet\"]",
+        "PASS_TO_PASS": "[]",
+        "environment_setup_commit": ""
+      },
+      "truncated_cells": []
+    }
+  ],
+  "num_rows_total": 2,
+  "num_rows_per_page": 100,
+  "partial": false
+}
