@@ -47,7 +47,7 @@ const runKey = (id: string) => `bench:${id}`;
 const benchRacerKey = (conversationId: string) => `benchRacer:${conversationId}`;
 /** A cell's running check, by its pid and start, which a restart of Mirador in place leaves running. */
 const benchCheckKey = (id: string, cell: number) => `bench-check:${id}:${cell}`;
-const timeLimitKey = (id: string, cell: number) => `${id}:${cell}`;
+const cellKey = (id: string, cell: number) => `${id}:${cell}`;
 const RUNS = "benchRuns";
 
 const runCaptains = new Map<string, CaptainContext>();
@@ -60,7 +60,11 @@ const validatingForms = new Set<string>();
 const retryTurnsBegun = new Set<string>();
 /** The bench checks this run of Mirador runs, by `benchCheckKey`; a cell still checking but not here had its check cut short by a restart. */
 const checksUnderWay = new Set<string>();
-/** The time limits of working and retrying cells, by `timeLimitKey`. */
+/** The cells this run of Mirador is starting a racer for, by `cellKey`; a cell still starting but not here had its start cut short by a restart. */
+const startsUnderWay = new Set<string>();
+/** The cells whose second try this run of Mirador began, by `cellKey`; a cell still retrying but not here had its second try cut short by a restart. */
+const retriesUnderWay = new Set<string>();
+/** The time limits of working and retrying cells, by `cellKey`. */
 const timeLimits = new Map<string, ReturnType<typeof setTimeout>>();
 
 const keptRun = (storage: CanvasPluginStorage, id: string) => storage.get(runKey(id)) as KeptRun | undefined;
@@ -187,7 +191,7 @@ function markDone(cell: BenchCell, result: CellResult, note: string | null, capt
 }
 
 function clearTimeLimit(id: string, index: number) {
-  const key = timeLimitKey(id, index);
+  const key = cellKey(id, index);
   const timer = timeLimits.get(key);
   if (timer !== undefined) clearTimeout(timer);
   timeLimits.delete(key);
@@ -200,7 +204,7 @@ function armTimeLimit(storage: CanvasPluginStorage, id: string, index: number) {
   if (!kept || !cell || cell.startedAt === null) return;
   const left = cell.startedAt + kept.run.settings.agentTimeLimitMinutes * 60_000 - Date.now();
   clearTimeLimit(id, index);
-  const key = timeLimitKey(id, index);
+  const key = cellKey(id, index);
   const timer = setTimeout(() => {
     timeLimits.delete(key);
     timeLimitReached(storage, id, index).catch((error) => console.error(`bench run ${id}: cell ${index} could not be timed out:`, error));
@@ -222,6 +226,12 @@ async function timeLimitReached(storage: CanvasPluginStorage, id: string, index:
   await advance(storage, id);
 }
 
+/** Whether a cell is still waiting for its racer to start: Stop run, or a resume, may have ended it while Mirador started it. */
+function stillStarting(storage: CanvasPluginStorage, id: string, index: number) {
+  const kept = keptRun(storage, id);
+  return kept?.run.phase === "running" && kept.run.cells[index]?.state === "starting";
+}
+
 /** Starts the cells `cellsToStart` gives, each racer alone in a worktree from its problem's start. */
 async function advance(storage: CanvasPluginStorage, id: string) {
   const kept = keptRun(storage, id);
@@ -234,9 +244,11 @@ async function advance(storage: CanvasPluginStorage, id: string) {
     return;
   }
   updateRun(storage, id, (run) => picked.forEach((index) => (run.cells[index]!.state = "starting")));
-  const set = await setOf(kept.run);
-  await Promise.all(
-    picked.map(async (index) => {
+  const startKeys = picked.map((index) => cellKey(id, index));
+  startKeys.forEach((key) => startsUnderWay.add(key));
+  try {
+    const set = await setOf(kept.run);
+    await Promise.all(picked.map(async (index) => {
       const current = keptRun(storage, id);
       if (!current || current.run.phase !== "running") return;
       const cell = current.run.cells[index]!;
@@ -253,25 +265,34 @@ async function advance(storage: CanvasPluginStorage, id: string) {
           worktree: { from: problem.start },
         });
         if (!started.worktree) throw new Error("This Mirador started a racer without a worktree of its own; bench needs Mirador's plugin API 14.");
+        const startedInTime = stillStarting(storage, id, index);
         updateRun(storage, id, (run) => {
           const begun = run.cells[index]!;
           begun.conversationId = started.id;
           begun.folder = started.worktree!.folder;
           begun.branch = started.worktree!.branch;
+          if (!startedInTime) return;
           begun.startedAt = Date.now();
           begun.state = "working";
         });
+        if (!startedInTime) {
+          await captain.stopConversation(started.id).catch(() => {});
+          return;
+        }
         armTimeLimit(storage, id, index);
         storage.set(benchRacerKey(started.id), { run: id, cell: index } satisfies KeptBenchRacer);
       } catch (error) {
-        await cellDone(storage, id, index, "couldn't start", error instanceof Error ? error.message : String(error));
+        if (stillStarting(storage, id, index)) await cellDone(storage, id, index, "couldn't start", error instanceof Error ? error.message : String(error));
       }
-    }),
-  );
+    }));
+  } finally {
+    startKeys.forEach((key) => startsUnderWay.delete(key));
+  }
 }
 
 async function cellDone(storage: CanvasPluginStorage, id: string, index: number, result: CellResult, note: string | null = null) {
   clearTimeLimit(id, index);
+  retriesUnderWay.delete(cellKey(id, index));
   const kept = keptRun(storage, id);
   const captain = kept ? runCaptains.get(kept.captain) : undefined;
   updateRun(storage, id, (run) => markDone(run.cells[index]!, result, note, captain));
@@ -305,6 +326,7 @@ async function checkCell(storage: CanvasPluginStorage, id: string, index: number
   const kept = keptRun(storage, id);
   if (!kept) return;
   const cell = kept.run.cells[index]!;
+  retriesUnderWay.delete(cellKey(id, index));
   updateRun(storage, id, (run) => (run.cells[index]!.state = "checking"));
   const set = await setOf(kept.run);
   const problem = set.problems.find(({ id: problemId }) => problemId === cell.problem)!;
@@ -317,6 +339,7 @@ async function checkCell(storage: CanvasPluginStorage, id: string, index: number
     await cellDone(storage, id, index, result);
     return;
   }
+  retriesUnderWay.add(cellKey(id, index));
   updateRun(storage, id, (run) => (run.cells[index]!.state = "retrying"));
   try {
     await runCaptains.get(kept.captain)!.promptStarted!(cell.conversationId!, retryPrompt(check));
@@ -361,8 +384,8 @@ async function resumeRun(storage: CanvasPluginStorage, id: string) {
   if (!kept || kept.run.phase !== "running") return;
   const left = kept.run.cells.map((cell, index) => ({ cell, index }));
   const cutShort = left.filter(({ cell, index }) => cell.state === "checking" && !checksUnderWay.has(benchCheckKey(id, index)));
-  const midRetry = left.filter(({ cell }) => cell.state === "retrying");
-  const midStart = left.filter(({ cell }) => cell.state === "starting");
+  const midRetry = left.filter(({ cell, index }) => cell.state === "retrying" && !retriesUnderWay.has(cellKey(id, index)));
+  const midStart = left.filter(({ cell, index }) => cell.state === "starting" && !startsUnderWay.has(cellKey(id, index)));
   await Promise.all(cutShort.map(({ index }) => checkCell(storage, id, index)));
   for (const { index } of midRetry) await cellDone(storage, id, index, "failed", "Mirador restarted during its second try.");
   for (const { index } of midStart) await cellDone(storage, id, index, "couldn't start", "Mirador restarted as it started.");
@@ -421,7 +444,10 @@ async function stopRun(id: string, context: CaptainContext) {
       if (cell.result === null) markDone(cell, "stopped", null, context);
     });
   });
-  kept.run.cells.forEach((_, index) => clearTimeLimit(id, index));
+  kept.run.cells.forEach((_, index) => {
+    clearTimeLimit(id, index);
+    retriesUnderWay.delete(cellKey(id, index));
+  });
   checks.stopRace(id);
   await Promise.all(working.flatMap(({ conversationId }) => (conversationId ? [context.stopConversation(conversationId).catch(() => {})] : [])));
   if (ended) await leaveResults(ended.run, resultsFileName(ended.run));

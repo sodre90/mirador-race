@@ -290,6 +290,59 @@ test("Stop run stops the racers still working, marks the rest stopped, and tells
   expect(mirador.promptsTo(mirador.captain.conversationId)).toEqual([]);
 });
 
+/** Holds back the starts of the racers whose title `toHold` matches until `letThrough`; `held` counts the starts waiting. */
+function holdStarts(mirador: Mirador, toHold: (title: string) => boolean) {
+  const startConversation = mirador.captain.startConversation;
+  const hold = { held: 0, letThrough: () => {} };
+  const through = new Promise<void>((resolve) => (hold.letThrough = resolve));
+  mirador.captain.startConversation = async (request) => {
+    if (toHold(request.title ?? "")) {
+      hold.held++;
+      await through;
+    }
+    return startConversation(request);
+  };
+  return hold;
+}
+
+test("Stop run while a racer starts leaves its cell stopped and stops the conversation it gets", async () => {
+  await makeSet(repo, ["answer"]);
+  const mirador = miradorOf();
+  const start = holdStarts(mirador, () => true);
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  await until(() => start.held === 1, "the racer is starting");
+
+  expect(await mirador.act({ kind: "stop" })).toEqual({ stopped: true });
+  start.letThrough();
+  await until(() => mirador.stopped.length === 1, "the racer that started late stopped");
+
+  const late = mirador.started[0]!;
+  expect(mirador.page().cells[0], "the cell keeps the late racer, for its page and its cleanup").toMatchObject({ state: "done", result: "stopped", conversationId: late.id, folder: late.folder, branch: late.branch, startedAt: null });
+  expect(mirador.stopped).toEqual([late.id]);
+});
+
+test("a resume with no restart before it, as when the run's page loads again, leaves racers starting or on their second try going", async () => {
+  await makeSet(repo, ["a", "b"]);
+  const mirador = miradorOf();
+  const bStart = holdStarts(mirador, (title) => title.includes(" · b · "));
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }], atOnce: 2 });
+  await until(() => mirador.page().cells[0]!.state === "working" && bStart.held === 1, "a's racer works and b's is starting");
+  await mirador.replied(1, finished("done"));
+  expect(mirador.page().cells[0]!.state).toBe("retrying");
+
+  expect(await mirador.act({ kind: "resume" })).toEqual({ resuming: true });
+  await Bun.sleep(50);
+  expect(mirador.page().cells.map(({ state, result }) => ({ state, result }))).toEqual([
+    { state: "retrying", result: null },
+    { state: "starting", result: null },
+  ]);
+
+  bStart.letThrough();
+  await until(() => mirador.page().cells[1]!.state === "working", "b's racer works");
+  expect(mirador.page().cells[0]!.state).toBe("retrying");
+  expect(mirador.stopped).toEqual([]);
+});
+
 test("an agent's call only drafts the run on a form, filled in with what it asked, and starts nothing; the user's /race:bench without columns gets an empty form; a workspace that isn't a set is refused saying why; unknown profiles and problems are refused, from the agent too", async () => {
   await makeSet(repo, ["two-fer", "bob"]);
   const agent = miradorOf({ caller: "agent" });
