@@ -21,9 +21,17 @@ command -v uvx >/dev/null 2>&1 || {
   echo "uvx isn't installed. Install uv, which provides it: curl -LsSf https://astral.sh/uv/install.sh | sh"
   exit 1
 }
+command -v docker >/dev/null 2>&1 || {
+  echo "docker isn't installed. SWE-bench's harness checks each instance in a Docker container."
+  exit 1
+}
 
 work=$(mktemp -d) || exit 1
-trap 'rm -rf "$work"' EXIT
+tmp_root=$(printenv TMPDIR) && [ -n "$tmp_root" ] || tmp_root=/tmp
+lock="$tmp_root/race-swebench-$instance_id.lock"
+held=""
+trap '[ -z "$held" ] || rm -rf "$lock"; rm -rf "$work"' EXIT
+trap 'exit 143' TERM
 
 own_index=$(git rev-parse --git-path index)
 if [ -f "$own_index" ]; then
@@ -39,6 +47,23 @@ if [ ! -s "$work/model.patch" ]; then
   echo "No changes against $base_commit; there is nothing to evaluate."
   exit 1
 fi
+
+# Checks of one instance take turns: the harness removes the instance's image when it ends, and a check still
+# under way would pull it again for this machine's platform. A lock whose check is gone is taken over.
+until mkdir "$lock" 2>/dev/null; do
+  holder=""
+  { read -r holder < "$lock/pid"; } 2>/dev/null
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$lock"; else sleep 2; fi
+done
+held=1
+echo $$ > "$lock/pid"
+
+# SWE-bench publishes x86_64 images only, and its harness pulls for this machine's platform, which fails on arm64.
+image="swebench/sweb.eval.x86_64.$(printf '%s' "$instance_id" | sed 's/__/_1776_/g'):latest"
+docker image inspect "$image" >/dev/null 2>&1 || docker pull --quiet --platform linux/amd64 "$image" >/dev/null || {
+  echo "Docker couldn't pull $image."
+  exit 1
+}
 
 tab=$(printf '\t')
 cr=$(printf '\r')

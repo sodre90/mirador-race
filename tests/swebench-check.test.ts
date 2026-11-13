@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { SWEBENCH_CHECK } from "../scripts/import-swebench.ts";
 
 const FAKE_UVX = `#!/bin/sh
+if ! mkdir "$FAKE_UVX_BUSY" 2>/dev/null; then echo "two harness runs at once" >> "$FAKE_UVX_OVERLAP"; fi
+sleep "\${FAKE_UVX_SECONDS:-0}"
+rmdir "$FAKE_UVX_BUSY" 2>/dev/null
 printf '%s\\0' "$@" > "$FAKE_UVX_ARGS"
 pwd > "$FAKE_UVX_CWD"
 prev=""
@@ -29,7 +32,14 @@ printf 'line one of test output\\nFAIL tests/test_calc.py::test_combine\\n' > "$
 exit "\${FAKE_UVX_EXIT:-0}"
 `;
 
-const TOOLS = ["git", "mktemp", "cp", "sed", "awk", "grep", "tail", "rm", "basename", "mkdir"];
+const FAKE_DOCKER = `#!/bin/sh
+printf '%s\\0' "$@" >> "$FAKE_DOCKER_ARGS"
+if [ "$1 $2" = "image inspect" ]; then exit 1; fi
+if [ "$1" = pull ]; then exit "\${FAKE_DOCKER_PULL_EXIT:-0}"; fi
+exit 0
+`;
+
+const TOOLS = ["git", "mktemp", "cp", "sed", "awk", "grep", "tail", "rm", "basename", "mkdir", "rmdir", "sleep", "printenv"];
 
 let scratch: string;
 let bin: string;
@@ -54,11 +64,13 @@ async function makeBin(withUvx: boolean) {
       await symlink(real, join(dir, tool));
     }),
   );
-  if (withUvx) {
-    const uvx = join(dir, "uvx");
-    await writeFile(uvx, FAKE_UVX);
-    await chmod(uvx, 0o755);
-  }
+  const fakes = withUvx ? { uvx: FAKE_UVX, docker: FAKE_DOCKER } : { docker: FAKE_DOCKER };
+  await Promise.all(
+    Object.entries(fakes).map(async ([name, script]) => {
+      await writeFile(join(dir, name), script);
+      await chmod(join(dir, name), 0o755);
+    }),
+  );
   return dir;
 }
 
@@ -77,10 +89,16 @@ async function makeRacer() {
   await git(["add", "calc.py"]);
 }
 
-async function runCheckScript({ resolved = true, noReport = false, uvxExit }: { resolved?: boolean; noReport?: boolean; uvxExit?: number } = {}) {
+async function runCheckScript({ resolved = true, noReport = false, uvxExit, pullExit, uvxSeconds }: { resolved?: boolean; noReport?: boolean; uvxExit?: number; pullExit?: number; uvxSeconds?: number } = {}) {
   const env = {
     ...process.env,
     PATH: bin,
+    TMPDIR: scratch,
+    FAKE_UVX_BUSY: join(scratch, "uvx-busy"),
+    FAKE_UVX_OVERLAP: join(scratch, "uvx-overlap"),
+    ...(uvxSeconds === undefined ? {} : { FAKE_UVX_SECONDS: String(uvxSeconds) }),
+    FAKE_DOCKER_ARGS: join(scratch, "docker-args"),
+    ...(pullExit === undefined ? {} : { FAKE_DOCKER_PULL_EXIT: String(pullExit) }),
     FAKE_UVX_ARGS: join(scratch, "uvx-args"),
     FAKE_UVX_CWD: join(scratch, "uvx-cwd"),
     FAKE_UVX_PREDICTIONS: join(scratch, "predictions.json"),
@@ -93,6 +111,7 @@ async function runCheckScript({ resolved = true, noReport = false, uvxExit }: { 
   return { stdout, stderr, exitCode };
 }
 
+const dockerCalls = () => readFile(join(scratch, "docker-args"), "utf8").then((text) => text.split("\0").slice(0, -1));
 const recordedArgs = () => readFile(join(scratch, "uvx-args"), "utf8").then((text) => text.split("\0").slice(0, -1));
 const predictions = async () => JSON.parse(await readFile(join(scratch, "predictions.json"), "utf8")) as { instance_id: string; model_name_or_path: string; model_patch: string }[];
 
@@ -175,4 +194,41 @@ test("a racer that changed nothing fails without running the harness", async () 
   expect(exitCode).toBe(1);
   expect(stdout).toContain("No changes against");
   expect(existsSync(join(scratch, "uvx-args")), "the harness never ran").toBe(false);
+});
+
+test("the instance's x86_64 image is pulled for linux/amd64 before the harness runs, as the harness would ask for this machine's platform", async () => {
+  const { exitCode } = await runCheckScript();
+
+  expect(exitCode).toBe(0);
+  const image = "swebench/sweb.eval.x86_64.demo_1776_alpha-1:latest";
+  expect(await dockerCalls()).toEqual(["image", "inspect", image, "pull", "--quiet", "--platform", "linux/amd64", image]);
+});
+
+test("an image Docker can't pull fails the check without running the harness", async () => {
+  const { stdout, exitCode } = await runCheckScript({ pullExit: 1 });
+
+  expect(exitCode).toBe(1);
+  expect(stdout).toContain("Docker couldn't pull swebench/sweb.eval.x86_64.demo_1776_alpha-1:latest.");
+  expect(existsSync(join(scratch, "uvx-args"))).toBe(false);
+});
+
+test("two checks of one instance take turns, so one's harness never removes the image the other is about to use", async () => {
+  const both = await Promise.all([runCheckScript({ uvxSeconds: 2 }), runCheckScript({ uvxSeconds: 2 })]);
+
+  expect(both.map(({ exitCode }) => exitCode)).toEqual([0, 0]);
+  expect(existsSync(join(scratch, "uvx-overlap")), "the harness never ran twice at once").toBe(false);
+  expect(existsSync(join(scratch, `race-swebench-${instanceId}.lock`)), "the lock is gone").toBe(false);
+}, 20_000);
+
+test("a lock left by a check that is gone is taken over", async () => {
+  const gone = Bun.spawn(["true"]);
+  await gone.exited;
+  const lock = join(scratch, `race-swebench-${instanceId}.lock`);
+  await mkdir(lock);
+  await writeFile(join(lock, "pid"), `${gone.pid}\n`);
+
+  const { exitCode } = await runCheckScript();
+
+  expect(exitCode).toBe(0);
+  expect(existsSync(lock)).toBe(false);
 });
