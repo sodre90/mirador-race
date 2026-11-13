@@ -209,11 +209,18 @@ async function cleanUpRacer(storage: CanvasPluginStorage, id: string, index: num
       patch = diff.length <= DIFF_LIMIT ? diff : `${diff.slice(0, DIFF_LIMIT)}\n\n[Cut at ${DIFF_LIMIT} characters.]`;
     } catch {}
   }
+  const captain = runCaptains.get(kept.captain);
+  if (!captain) {
+    console.error(`bench run ${id}: cell ${index}'s conversation wasn't deleted, as Mirador was restarted since the run started.`);
+    return;
+  }
   storage.set(benchRacerKey(conversationId), undefined);
   try {
-    await runCaptains.get(kept.captain)?.deleteStarted(conversationId);
+    await captain.deleteStarted(conversationId);
   } catch (error) {
+    storage.set(benchRacerKey(conversationId), { run: id, cell: index } satisfies KeptBenchRacer);
     console.error(`bench run ${id}: cell ${index}'s conversation could not be deleted:`, error);
+    return;
   }
   updateRun(storage, id, (run) => {
     const cleaned = run.cells[index]!;

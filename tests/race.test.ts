@@ -12,7 +12,7 @@ import { fakeMirador as fakeMiradorIn, finished, git, PROFILES, until } from "./
 let scratch: string;
 let repo: string;
 
-const fakeMirador = (options: { refuseRacer?: number; caller?: "agent" | "user" } = {}) => fakeMiradorIn({ ...options, repo, scratch });
+const fakeMirador = (options: { refuseRacer?: number; refuseDelete?: (conversationId: string) => boolean; caller?: "agent" | "user" } = {}) => fakeMiradorIn({ ...options, repo, scratch });
 
 beforeEach(async () => {
   scratch = await realpath(await mkdtemp(join(tmpdir(), "race-test-")));
@@ -544,6 +544,28 @@ test("once the work is taken, deleteRacers deletes every racer, keeping each one
   expect(await mirador.act({ kind: "diff", racer: 1 })).toEqual({ diff: race.racers[0]!.patch });
   expect(await mirador.act({ kind: "diff", racer: 2 })).toEqual({ diff: race.racers[1]!.patch });
   expect(await mirador.act({ kind: "deleteRacers" })).toEqual({ deleted: 0 });
+});
+
+test("a racer Mirador couldn't delete isn't marked deleted and keeps its key, the refusal names it, and a later press deletes it", async () => {
+  const refused = new Set<string>();
+  const mirador = fakeMirador({ refuseDelete: (id) => refused.has(id) });
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  const second = mirador.started[1]!.id;
+  refused.add(second);
+
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow(`Racer 2 couldn't be deleted: Conversation ${second} wasn't started by the race plugin`);
+
+  expect(mirador.deleted).toEqual([mirador.started[0]!.id]);
+  expect(mirador.page().racers.map(({ deletedAt }) => typeof deletedAt)).toEqual(["number", "object"]);
+  expect(mirador.captain.storage.get(`racer:${second}`)).toEqual({ race: mirador.page().id, number: 2 });
+
+  refused.clear();
+  expect(await mirador.act({ kind: "deleteRacers" })).toEqual({ deleted: 1 });
+  expect(mirador.deleted).toEqual(mirador.started.map(({ id }) => id));
 });
 
 test("a stopped race can delete its racers too", async () => {

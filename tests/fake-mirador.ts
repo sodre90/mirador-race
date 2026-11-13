@@ -31,6 +31,7 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
   scratch,
   refuseRacer,
   refuseProfile,
+  refuseDelete,
   caller = "user",
   itemType = ITEM_TYPE,
 }: {
@@ -38,6 +39,8 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
   scratch: string;
   refuseRacer?: number;
   refuseProfile?: string;
+  /** The conversations whose delete throws, as Mirador's does for one this plugin didn't start. */
+  refuseDelete?: (conversationId: string) => boolean;
   caller?: "agent" | "user";
   itemType?: string;
 }) {
@@ -99,6 +102,7 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
       stopped.push(id);
     },
     async deleteStarted(id) {
+      if (refuseDelete?.(id)) throw new Error(`Conversation ${id} wasn't started by the race plugin from this conversation, so it can't be deleted from here.`);
       deleted.push(id);
     },
     async promptStarted(id, text) {

@@ -203,3 +203,15 @@ test("A run that deletes its racers keeps each one's changes", async ({ page }) 
   await view.locator(".cell-details").getByRole("button", { name: "Changes" }).click();
   await expect(view.locator(".cell-details").getByLabel("Changes"), "the cell's Changes still shows the change to answer.txt").toContainText("+42");
 });
+
+test("A drafted run of more than 20 racers comes with Delete each racer ticked", async ({ page }) => {
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  const columns = Array.from({ length: 6 }, () => ({ profile: profileName }));
+  await helpers().callCanvasTool(host, captainId, "bench", { columns, attempts: 5, problems: ["answer", "never"] });
+
+  const view = helpers().walkthroughView(page);
+  await expect(view.getByRole("heading", { name: "New benchmark run" })).toBeVisible();
+  await expect(view.getByLabel("Column 6's profile")).toBeVisible();
+  await expect(view.getByLabel("Delete each racer's conversation and worktree once its result is kept"), "2 problems × 6 columns × 5 attempts is 60 racers").toBeChecked();
+});

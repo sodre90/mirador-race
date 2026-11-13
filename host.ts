@@ -496,6 +496,7 @@ async function deleteRacers(id: string, context: CanvasActionContext<Race | Benc
   if (deletingRacers.has(id)) throw new Error("The racers are being deleted already.");
   deletingRacers.add(id);
   let deleted = 0;
+  const failed: { number: number; why: string }[] = [];
   try {
     for (const racer of kept.race.racers) {
       if (typeof racer.deletedAt === "number") continue;
@@ -510,7 +511,9 @@ async function deleteRacers(id: string, context: CanvasActionContext<Race | Benc
       try {
         await context.deleteStarted(racer.conversationId);
       } catch (error) {
-        console.error(`race ${id}: racer ${racer.number}'s conversation could not be deleted:`, error);
+        context.storage.set(racerKey(racer.conversationId), { race: id, number: racer.number } satisfies KeptRacer);
+        failed.push({ number: racer.number, why: error instanceof Error ? error.message : String(error) });
+        continue;
       }
       update(context.storage, id, (race) => {
         const gone = race.racers.find(({ number }) => number === racer.number);
@@ -523,6 +526,7 @@ async function deleteRacers(id: string, context: CanvasActionContext<Race | Benc
   } finally {
     deletingRacers.delete(id);
   }
+  if (failed.length > 0) throw new Error(`Racer${failed.length === 1 ? "" : "s"} ${failed.map(({ number }) => number).join(", ")} couldn't be deleted: ${failed[0]!.why}`);
   return { deleted };
 }
 

@@ -44,7 +44,7 @@ async function makeSet(folder: string, problems: string[], settings: Record<stri
   await git(folder, ["commit", "-qm", "set"]);
 }
 
-const miradorOf = (options: { caller?: "agent" | "user"; refuseProfile?: string } = {}) => fakeMirador<BenchRun>({ repo, scratch, itemType: BENCH_ITEM_TYPE, ...options });
+const miradorOf = (options: { caller?: "agent" | "user"; refuseProfile?: string; refuseDelete?: (conversationId: string) => boolean } = {}) => fakeMirador<BenchRun>({ repo, scratch, itemType: BENCH_ITEM_TYPE, ...options });
 
 type Mirador = ReturnType<typeof miradorOf>;
 
@@ -620,6 +620,21 @@ test("a run with deleteRacers deletes each racer once its result is kept, keepin
   expect(run.cells[1]!.patch).toContain("+42\n");
   const results = JSON.parse(readFileSync(join(repo, "runs", resultsName(run)), "utf8")) as { cells: { patch: string | null }[] };
   expect(results.cells.map(({ patch }) => patch)).toEqual(run.cells.map(({ patch }) => patch));
+});
+
+test("with deleteRacers, a racer Mirador couldn't delete keeps its conversation, folder and branch on its cell", async () => {
+  await makeSet(repo, ["answer"]);
+  const mirador = miradorOf({ refuseDelete: () => true });
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }], deleteRacers: true });
+  await until(() => mirador.started.length === 1, "the racer started");
+  const racer = mirador.started[0]!;
+  writeFileSync(join(racer.folder, "answer.txt"), "42\n");
+
+  await mirador.replied(1, finished("done"));
+
+  expect(mirador.deleted).toEqual([]);
+  expect(mirador.page().cells[0]).toMatchObject({ result: "passed", conversationId: racer.id, folder: racer.folder, branch: racer.branch, patch: null });
+  expect(mirador.captain.storage.get(`benchRacer:${racer.id}`)).toEqual({ run: mirador.page().id, cell: 0 });
 });
 
 test("a run without deleteRacers deletes none, and its cells' patch stays null", async () => {
