@@ -401,6 +401,31 @@ test("the agent's draft needs the task, and names only profiles Mirador has, or 
   expect(mirador.started).toEqual([]);
 });
 
+test("an agent's draft carries its advice to the form, and a race the user starts from /race:race has none", async () => {
+  const agent = fakeMirador({ caller: "agent" });
+  await agent.call(agent.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", advice: " Hidden tests fit: parse has clear right answers. " });
+  expect(agent.page()).toMatchObject({ phase: "setup", advice: "Hidden tests fit: parse has clear right answers." });
+
+  const blank = fakeMirador({ caller: "agent" });
+  await blank.call(blank.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", advice: "   " });
+  expect(blank.page().advice).toBeNull();
+
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", {});
+  expect(mirador.page().advice).toBeNull();
+  await mirador.act({ kind: "start", task: "Make answer 42", profiles: ["Qwen Flash", "Kimi"] });
+  expect(mirador.page().advice, "a started race keeps no advice: only the form shows it").toBeNull();
+});
+
+test("the race tool's guidance and description tell the agent to advise how to check the work", () => {
+  const description = host.tools.race!.description;
+  expect(description).toContain("Advise how to check the work");
+  expect(description).toContain("checkFiles");
+  expect(description).toContain("judge");
+  expect(description).toContain("advice");
+  expect(host.guidance!.instructions).toContain("Advise how to check their work");
+});
+
 test("the user's /race:race without a task or a profile gets a form, filled in with what they said", async () => {
   const mirador = fakeMirador();
 

@@ -68,7 +68,7 @@ test("the agent's race waits as a filled-in form for the user's Start, then star
   captainId = await startConversationWithoutModel(page);
   await sendAndWait(page, "Start");
 
-  const drafted = await helpers().callCanvasTool(host, captainId, "race", { task: "FOLDER", profile: profileName, racers: 2, check: 'echo "checked in $PWD"' });
+  const drafted = await helpers().callCanvasTool(host, captainId, "race", { task: "FOLDER", profile: profileName, racers: 2, check: 'echo "checked in $PWD"', advice: "Hidden tests fit: parse has clear right answers." });
   expect(drafted).toContain("Nothing runs until the user checks it and presses Start race");
   const view = helpers().walkthroughView(page);
   const lane = (number: number) => view.locator(`.lane[data-racer="${number}"]`);
@@ -76,6 +76,7 @@ test("the agent's race waits as a filled-in form for the user's Start, then star
   await test.step("the form shows what the agent asked for, and no racer starts until the user presses Start race", async () => {
     await expect(view.getByRole("heading", { name: "New race" })).toBeVisible();
     await expect(view.getByLabel("Task")).toHaveValue("FOLDER");
+    await expect(view.getByRole("note")).toHaveText("The captain advises: Hidden tests fit: parse has clear right answers.");
     await expect(view.getByLabel("Check", { exact: true })).toHaveValue('echo "checked in $PWD"');
     for (const number of [1, 2]) await expect(view.getByLabel(`Racer ${number}'s profile`)).toHaveValue(profileName);
     await expect(view.getByLabel("Racer 3's profile")).toHaveCount(0);

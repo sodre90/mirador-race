@@ -75,6 +75,7 @@ interface RaceInput {
   checkFiles?: string;
   decide?: Decide;
   judge?: string;
+  advice?: string;
 }
 
 /** What a race's page asks of the plugin. */
@@ -456,7 +457,7 @@ function picked(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
 }
 
 const raceDescription =
-  "Draft a race for the user to start: several conversations at once, e.g. four of a small model, or one on each of several profiles to compare them, each in a git worktree and branch of its own, working on the same task and sharing a board where they post what they learn. This puts the race's form on the canvas, filled in with what you pass; nothing runs until the user checks it and presses Start race, so leave out profiles you aren't sure they want. When all racers have finished you hear their results as your next message; the user picks the work to take on the race page, or hands the pick to you. With decide: vote, the racers rank each other's work first. Racers branch from the last commit, so commit what they need first; the workspace's worktree setup command, such as installing dependencies, runs in each racer's folder before it starts.";
+  "Draft a race for the user to start: several conversations at once, e.g. four of a small model, or one on each of several profiles to compare them, each in a git worktree and branch of its own, working on the same task and sharing a board where they post what they learn. This puts the race's form on the canvas, filled in with what you pass; nothing runs until the user checks it and presses Start race, so leave out profiles you aren't sure they want. When all racers have finished you hear their results as your next message; the user picks the work to take on the race page, or hands the pick to you. With decide: vote, the racers rank each other's work first. Racers branch from the last commit, so commit what they need first; the workspace's worktree setup command, such as installing dependencies, runs in each racer's folder before it starts. Advise how to check the work: write tests the racers shouldn't see into a folder outside the repository and pass it as checkFiles, name a judge for what tests can't tell, and say why in advice; the user chooses on the form.";
 
 const DRAFTED =
   "The race's form is on the canvas, filled in with what you asked. Nothing runs until the user checks it and presses Start race: tell them it waits for them. When all racers have finished you hear their results, and the user picks the work to take on the race page.";
@@ -467,7 +468,7 @@ function publishForm(asked: RaceInput, context: CanvasToolContext<Race>) {
   context.publish({
     type: ITEM_TYPE,
     title: "New race",
-    data: blankRace({ task: asked.task?.trim(), profiles, size: asked.racers, check: asked.check?.trim() || null, checkFiles: asked.checkFiles?.trim() || null, decide: asked.decide, judge: asked.judge?.trim() || null }),
+    data: blankRace({ task: asked.task?.trim(), profiles, size: asked.racers, check: asked.check?.trim() || null, checkFiles: asked.checkFiles?.trim() || null, decide: asked.decide, judge: asked.judge?.trim() || null }, { advice: asked.advice }),
   });
 }
 
@@ -546,6 +547,12 @@ const host: CanvasHost<Race> = {
             minLength: 1,
             description:
               "A profile, by name, whose agent reads each finished racer's work against the task once the racers are checked and the vote is over, and scores it from 0 to 10 with reasons: for what a check can't tell, such as whether the work does the whole task, and how well it is made. Its scores order the results after the check.",
+          },
+          advice: {
+            type: "string",
+            minLength: 1,
+            description:
+              "Your advice on how to tell whether a racer did the task right, in a sentence or two, which the form shows the user above the choices you filled in: hidden check files (tests the racers never see) when tests can tell right from wrong, a judge when it takes judgement, such as design, wording or a page's look, or both.",
           },
         },
       },
@@ -712,7 +719,7 @@ const host: CanvasHost<Race> = {
   },
   guidance: {
     instructions:
-      "- race: when the user asks to race a task, draft the race: its form opens on the canvas, filled in with the task, the profiles (one for every racer, e.g. four of a small model, or one each to compare models; leave out any the user didn't name), the check and the vote, and the user starts it there. The racers work in git worktrees of their own, sharing a board; when they finish you hear their results, and the user picks the work to take or hands the pick to you.",
+      "- race: when the user asks to race a task, draft the race: its form opens on the canvas, filled in with the task, the profiles (one for every racer, e.g. four of a small model, or one each to compare models; leave out any the user didn't name), the check and the vote, and the user starts it there. The racers work in git worktrees of their own, sharing a board; when they finish you hear their results, and the user picks the work to take or hands the pick to you. Advise how to check their work: hidden check files when tests can tell right from wrong, a judge when it takes judgement, or both, with why; the user chooses on the form.",
     often: "- race: when the user asks to race a task on several agents; you draft it, the user starts it.",
   },
 };

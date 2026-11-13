@@ -127,6 +127,7 @@ style.textContent = `
   .note-card p { margin: 2px 0 0; white-space: pre-wrap; }
 
   .form { display: grid; gap: 12px; max-width: 760px; }
+  .advice { margin: 0; border-left: 3px solid var(--mirador-accent); background: var(--mirador-accent-soft); padding: 6px 10px; border-radius: 6px; }
   .racer-row { display: flex; gap: 8px; align-items: center; }
   .racer-row .badge { --size: 22px; }
   .racer-row > span:not(.badge) { min-width: 5em; color: var(--mirador-muted); }
@@ -762,6 +763,7 @@ function formView(race) {
             )
           : null,
       ),
+      race.advice ? el("p", { class: "advice", role: "note", text: `The captain advises: ${race.advice}` }) : null,
       el("label", {}, "Check (optional)", el("input", { type: "text", "aria-label": "Check", placeholder: "e.g. bun test", value: form.check, oninput: (event) => (form.check = event.target.value) })),
       el("label", {}, "Hidden check files (optional)", el("input", { type: "text", "aria-label": "Hidden check files", placeholder: "A folder the racers never get, e.g. /tmp/race-checks: copied over each racer's work before the check", value: form.checkFiles, oninput: (event) => (form.checkFiles = event.target.value) })),
       el("label", { class: "row" }, el("input", { type: "checkbox", checked: form.vote, onchange: (event) => (form.vote = event.target.checked) }), "The racers rank each other's work before I pick"),

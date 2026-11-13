@@ -90,6 +90,8 @@ export interface Race {
   check: string | null;
   /** A folder of check files the racers never get, copied over each racer's work just before its check; null for none. */
   checkFiles: string | null;
+  /** The captain's words on how to check the work, for the form. */
+  advice: string | null;
   decide: Decide;
   /** The judge's profile the race asked for; null for none. */
   judge: string | null;
@@ -169,8 +171,8 @@ export function raceRequest(input: { task?: string; profile?: string; profiles?:
   return { task, profiles, size, check, checkFiles, decide: input.decide === "vote" ? "vote" : "captain", judge: input.judge?.trim() || null };
 }
 
-/** A race not started yet: its form, with what the user already said. */
-export function blankRace(request: Partial<RaceRequest>): Race {
+/** A race not started yet: its form, with what the user already said, and the captain's advice on how to check the work. */
+export function blankRace(request: Partial<RaceRequest>, { advice }: { advice?: string | null } = {}): Race {
   const size = request.size ?? (request.profiles && request.profiles.length >= MIN_RACERS ? request.profiles.length : DEFAULT_RACERS);
   return {
     id: newRaceId(),
@@ -178,6 +180,7 @@ export function blankRace(request: Partial<RaceRequest>): Race {
     profiles: request.profiles ?? [],
     check: request.check ?? null,
     checkFiles: request.checkFiles ?? null,
+    advice: advice?.trim() || null,
     decide: request.decide ?? "captain",
     judge: request.judge ?? null,
     phase: "setup",
