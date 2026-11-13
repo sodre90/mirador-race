@@ -42,10 +42,10 @@ style.textContent = `
   .title-row { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
   .race-clock { font: 600 1.35em var(--mirador-mono, monospace); font-variant-numeric: tabular-nums; color: var(--mirador-muted); }
   .phase { display: inline-flex; align-items: center; gap: 6px; padding: 1px 10px; border-radius: 999px; font-weight: 600; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); }
-  .phase-racing, .phase-voting { --tone: var(--mirador-accent); }
+  .phase-racing, .phase-voting, .phase-judging { --tone: var(--mirador-accent); }
   .phase-picking, .phase-deciding { --tone: var(--mirador-ok); }
   .phase-stopped { --tone: var(--mirador-warn); }
-  .phase-racing::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--tone); animation: pulse 1.3s ease-out infinite; }
+  .phase-racing::before, .phase-judging::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--tone); animation: pulse 1.3s ease-out infinite; }
   @keyframes pulse { from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--tone) 60%, transparent); } to { box-shadow: 0 0 0 9px transparent; } }
   .race-head .meta code { display: inline-block; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
   .task { white-space: pre-wrap; margin: 0; }
@@ -166,6 +166,7 @@ const STAGES = [
 const PHASE_WORDS = {
   racing: "Racing",
   voting: "The racers are voting",
+  judging: "The judge is reading their work",
   picking: "Over: pick the work to take",
   deciding: "Over: the conversation that started it is taking the work",
   stopped: "Stopped",
@@ -247,7 +248,9 @@ function diffView(text) {
 
 const checkRank = { passed: 0, failed: 1, "timed out": 1, stopped: 2 };
 
-/** The finished racers best first: a passing check, then the vote, then the quicker, then the order they raced. */
+const scoreOf = (race, number) => race.judging?.scores.find(({ racer }) => racer === number)?.score;
+
+/** The finished racers best first: a passing check, then the judge's score, then the vote, then the quicker, then the order they raced. */
 function compared(race) {
   const standingOf = (number) => race.standings?.find(({ racer }) => racer === number);
   const place = (racer) => race.standings?.findIndex(({ racer: number }) => number === racer.number) ?? 0;
@@ -257,14 +260,15 @@ function compared(race) {
     .sort(
       (one, other) =>
         (checkRank[one.racer.check?.outcome] ?? 1) - (checkRank[other.racer.check?.outcome] ?? 1) ||
+        (scoreOf(race, other.racer.number) ?? -1) - (scoreOf(race, one.racer.number) ?? -1) ||
         place(one.racer) - place(other.racer) ||
         workMs(one.racer) - workMs(other.racer) ||
         one.racer.number - other.racer.number,
     );
 }
 
-/** The racers whose work passed Race's check, best first: only work that passed earns a place. */
-const placed = (race) => compared(race).filter(({ racer }) => racer.check?.outcome === "passed").map(({ racer }) => racer);
+/** The racers whose work passed Race's check, or that the judge scored in a race without a check, best first: only such work earns a place. */
+const placed = (race) => compared(race).filter(({ racer }) => racer.check?.outcome === "passed" || (!race.check && scoreOf(race, racer.number) !== undefined)).map(({ racer }) => racer);
 
 function laneClass(racer, place) {
   if (["working", "starting", "checking"].includes(racer.state)) return "lane running";
@@ -371,15 +375,17 @@ function podium(race) {
   if (!["picking", "deciding"].includes(race.phase)) return null;
   const top = placed(race).slice(0, 3);
   if (top.length === 0) return null;
-  const step = (racer, place) =>
-    el(
+  const step = (racer, place) => {
+    const score = scoreOf(race, racer.number);
+    return el(
       "div",
       { class: `step step-${place}`, "data-racer": String(racer.number), style: `--racer: ${colorOf(racer.number)}` },
       badge(racer.number),
       el("span", { class: "who", text: `Racer ${racer.number}` }),
-      el("span", { class: "how", text: `${racerProfile(race, racer)} · ✓ ${clock(workMs(racer))}` }),
+      el("span", { class: "how", text: [racerProfile(race, racer), racer.check?.outcome === "passed" ? `✓ ${clock(workMs(racer))}` : clock(workMs(racer)), score !== undefined ? `${score}/10` : null].filter(Boolean).join(" · ") }),
       el("div", { class: "block", text: String(place) }),
     );
+  };
   const [first, second, third] = top;
   return el("section", { class: "podium", "aria-label": "Podium" }, second ? step(second, 2) : null, step(first, 1), third ? step(third, 3) : null);
 }
@@ -474,6 +480,45 @@ function vote(race) {
   return el("section", {}, el("h2", { text: "Vote" }), standings, el("div", { class: "board" }, reasons));
 }
 
+/** The judge's scores, best first, or why there are none; while it judges, a way to open its conversation or skip it. */
+function judge(race) {
+  if (!race.judging) return null;
+  const { profile, conversationId, scores, summary, missed } = race.judging;
+  if (race.phase === "judging") {
+    const problem = el("p", { class: "problem", role: "alert" });
+    const open =
+      conversationId && window.mirador.openConversation
+        ? el("button", { text: "Open", "data-hint": "Open the judge's conversation", onclick: () => window.mirador.openConversation(conversationId).catch((error) => (problem.textContent = error.message)) })
+        : null;
+    return el(
+      "section",
+      {},
+      el("h2", { text: "Judge" }),
+      el("p", { text: `${profile} reads each racer's work against the task…` }),
+      el("div", { class: "row" }, open, el("button", { class: "stop", text: "Skip the judge", onclick: () => window.mirador.send({ kind: "stop" }).catch((error) => (problem.textContent = error.message)) })),
+      problem,
+    );
+  }
+  const body =
+    scores.length > 0
+      ? [
+          el(
+            "div",
+            { class: "board", "aria-label": "Scores" },
+            [...scores]
+              .sort((one, other) => other.score - one.score || one.racer - other.racer)
+              .map(({ racer, score, why }) =>
+                el("div", { class: "note-card", style: `--racer: ${colorOf(racer)}` }, badge(racer), el("div", { class: "bubble" }, el("div", { class: "who", text: `Racer ${racer} · ${score}/10` }), el("p", { text: why }))),
+              ),
+          ),
+          summary ? el("p", { text: summary }) : null,
+        ]
+      : missed
+        ? [el("p", { class: "meta", text: `The judge (${profile}) gave no scores: ${missed}.` })]
+        : [];
+  return el("section", {}, el("h2", { text: "Judge" }), body);
+}
+
 /** The pick goes to the captain, then the race records it; one that went but wasn't recorded keeps its buttons off, so it isn't sent twice. */
 async function sendPick(race, pick, problem, buttons) {
   buttons.forEach((button) => (button.disabled = true));
@@ -503,19 +548,22 @@ function comparison(race) {
     buttons.push(made);
     return made;
   };
+  const columns = ["Racer", "Check", ...(race.judge ? ["Judge"] : []), "Vote", "Changes", ""];
   const table = el(
     "table",
     { class: "results", "aria-label": "Results" },
-    el("thead", {}, el("tr", {}, ...["Racer", "Check", "Vote", "Changes", ""].map((text) => el("th", { text })))),
+    el("thead", {}, el("tr", {}, ...columns.map((text) => el("th", { text })))),
     el(
       "tbody",
       {},
-      rows.map(({ racer, standing }) =>
-        el(
+      rows.map(({ racer, standing }) => {
+        const scored = race.judging?.scores.find(({ racer: number }) => number === racer.number);
+        return el(
           "tr",
           { "data-racer": String(racer.number) },
           el("td", { class: "racer" }, el("span", {}, badge(racer.number), el("span", {}, `Racer ${racer.number}`, el("span", { class: "profile", text: racerProfile(race, racer) })))),
           el("td", { class: racer.check ? `check-${racer.check.outcome.replace(" ", "-")}` : "empty", text: racer.check ? shortCheckWords(racer.check) : race.check ? "Not checked" : "No check" }),
+          race.judge ? el("td", { class: "judge", title: scored?.why, text: scored ? `${scored.score}/10` : "–" }) : null,
           el("td", { class: "vote", text: standing ? voteWords(standing, race.standings.some(({ points }) => points > 0)) : "–" }),
           el("td", { class: "changes", text: racer.changes ?? "–" }),
           el(
@@ -539,8 +587,8 @@ function comparison(race) {
                 : null,
             ),
           ),
-        ),
-      ),
+        );
+      }),
     ),
   );
   const combine =
@@ -599,7 +647,7 @@ function header(race) {
       "div",
       { class: "meta" },
       el("span", { class: `phase phase-${race.phase}`, text: PHASE_WORDS[race.phase] ?? race.phase }),
-      ` · ${plural(race.size, "racer", "racers")} on ${profiles.join(", ") || "…"} · ${decide}`,
+      ` · ${plural(race.size, "racer", "racers")} on ${profiles.join(", ") || "…"} · ${decide}${race.judge ? ` · judged by ${race.judge}` : ""}`,
       check,
       hidden,
     ),
@@ -614,7 +662,7 @@ function raceView(race) {
     race.phase === "racing"
       ? el("button", { class: "stop", text: "Stop race", onclick: () => window.mirador.send({ kind: "stop" }).catch((error) => (problem.textContent = error.message)) })
       : null;
-  return [header(race), podium(race), comparison(race), lanes(race, problem), el("div", { class: "row" }, stop, problem), board(race), vote(race)];
+  return [header(race), podium(race), comparison(race), lanes(race, problem), el("div", { class: "row" }, stop, problem), board(race), vote(race), judge(race)];
 }
 
 /** The form's answers, from the race's draft the first time, then as the user changes them. */
@@ -627,6 +675,7 @@ function formOf(race) {
       check: race.check ?? "",
       checkFiles: race.checkFiles ?? "",
       vote: race.decide === "vote",
+      judge: race.judge ?? "",
     };
   }
   return shown.form;
@@ -640,6 +689,7 @@ function loadProfiles(race) {
       shown.profiles = profiles;
       const form = formOf(race);
       form.profiles = form.profiles.map((name) => profiles.find((profile) => profile.name.toLowerCase() === name.toLowerCase())?.name ?? profiles[0]?.name ?? "");
+      form.judge = profiles.find((profile) => profile.name.toLowerCase() === form.judge.toLowerCase())?.name ?? "";
       draw(lastRace);
     },
     (error) => console.error("race: the profiles could not be listed:", error),
@@ -680,7 +730,7 @@ function formView(race) {
       start.disabled = true;
       problem.textContent = "";
       try {
-        await window.mirador.send({ kind: "start", task: form.task, profiles: form.profiles, check: form.check, checkFiles: form.checkFiles, decide: form.vote ? "vote" : "captain" });
+        await window.mirador.send({ kind: "start", task: form.task, profiles: form.profiles, check: form.check, checkFiles: form.checkFiles, decide: form.vote ? "vote" : "captain", judge: form.judge || undefined });
       } catch (error) {
         problem.textContent = error.message;
         start.disabled = false;
@@ -715,6 +765,12 @@ function formView(race) {
       el("label", {}, "Check (optional)", el("input", { type: "text", "aria-label": "Check", placeholder: "e.g. bun test", value: form.check, oninput: (event) => (form.check = event.target.value) })),
       el("label", {}, "Hidden check files (optional)", el("input", { type: "text", "aria-label": "Hidden check files", placeholder: "A folder the racers never get, e.g. /tmp/race-checks: copied over each racer's work before the check", value: form.checkFiles, oninput: (event) => (form.checkFiles = event.target.value) })),
       el("label", { class: "row" }, el("input", { type: "checkbox", checked: form.vote, onchange: (event) => (form.vote = event.target.checked) }), "The racers rank each other's work before I pick"),
+      el(
+        "label",
+        {},
+        "Judge (optional)",
+        el("select", { "aria-label": "Judge", onchange: (event) => (form.judge = event.target.value) }, el("option", { value: "", selected: form.judge === "", text: "No judge" }), options(form.judge)),
+      ),
       el("div", { class: "row" }, start, problem),
     ),
   ];

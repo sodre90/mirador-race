@@ -56,12 +56,31 @@ export interface Standing {
   firsts: number[];
 }
 
+export interface Score {
+  racer: number;
+  /** 0 to 10. */
+  score: number;
+  why: string;
+}
+
+/** The judge of a race: its profile, its conversation once started, and what it said. */
+export interface Judging {
+  profile: string;
+  conversationId: string | null;
+  scores: Score[];
+  /** Its words on the race as a whole, such as what set the best apart. */
+  summary: string | null;
+  /** Why it gave no scores: it couldn't start, ended its turn without, or was stopped. Null while it judges, or once it scored. */
+  missed: string | null;
+}
+
 /**
  * setup: the form, which the agent may have filled in, waits for the user's Start. racing: the racers work. voting: they
- * rank each other's work. picking: it waits for the user to pick the work on its page. deciding: the conversation that
- * started the race picks, or takes what the user picked. stopped: the user stopped it.
+ * rank each other's work. judging: a judge reads the finished racers' work and scores it. picking: it waits for the user
+ * to pick the work on its page. deciding: the conversation that started the race picks, or takes what the user picked.
+ * stopped: the user stopped it.
  */
-export type Phase = "setup" | "racing" | "voting" | "picking" | "deciding" | "stopped";
+export type Phase = "setup" | "racing" | "voting" | "judging" | "picking" | "deciding" | "stopped";
 
 export interface Race {
   id: string;
@@ -72,6 +91,8 @@ export interface Race {
   /** A folder of check files the racers never get, copied over each racer's work just before its check; null for none. */
   checkFiles: string | null;
   decide: Decide;
+  /** The judge's profile the race asked for; null for none. */
+  judge: string | null;
   phase: Phase;
   /** How many racers it starts. */
   size: number;
@@ -82,6 +103,8 @@ export interface Race {
   votes: Vote[];
   abstained: number[];
   standings: Standing[] | null;
+  /** Null until the judge starts. */
+  judging: Judging | null;
   /** What the user picked on the page, in a few words. */
   picked: string | null;
   /** The commit every racer started from, once git knows all their branches. */
@@ -97,6 +120,7 @@ export interface RaceRequest {
   check: string | null;
   checkFiles: string | null;
   decide: Decide;
+  judge: string | null;
 }
 
 /** What the user picked on a race's page. */
@@ -109,6 +133,7 @@ export const DIFF_LIMIT = 40_000;
 export const MIN_RACERS = 2;
 export const MAX_RACERS = 6;
 export const DEFAULT_RACERS = 4;
+export const MAX_SCORE = 10;
 
 /** Its conversation works on the task. */
 export const conversationWorks = ({ state }: Racer) => state === "starting" || state === "working";
@@ -130,7 +155,7 @@ export const profileOf = (profiles: string[], number: number) => profiles[(numbe
  * The race the user or the agent asked for, or why it can't be one. Racers run on `profiles` in turn, or all on
  * `profile`; there are `racers` of them, else one per profile when several are named, else DEFAULT_RACERS.
  */
-export function raceRequest(input: { task?: string; profile?: string; profiles?: string[]; racers?: number; check?: string; checkFiles?: string; decide?: Decide }): RaceRequest | string {
+export function raceRequest(input: { task?: string; profile?: string; profiles?: string[]; racers?: number; check?: string; checkFiles?: string; decide?: Decide; judge?: string }): RaceRequest | string {
   const task = input.task?.trim() ?? "";
   const profiles = (input.profiles ?? (input.profile ? [input.profile] : [])).map((profile) => profile.trim()).filter(Boolean);
   if (!task) return "Say what the racers should do: the task.";
@@ -141,7 +166,7 @@ export function raceRequest(input: { task?: string; profile?: string; profiles?:
   const checkFiles = input.checkFiles?.trim() || null;
   if (checkFiles && !check) return "Hidden check files need a check to run them: give the check too.";
   if (checkFiles && !isAbsolute(checkFiles)) return "Give the hidden check files' folder as a full path.";
-  return { task, profiles, size, check, checkFiles, decide: input.decide === "vote" ? "vote" : "captain" };
+  return { task, profiles, size, check, checkFiles, decide: input.decide === "vote" ? "vote" : "captain", judge: input.judge?.trim() || null };
 }
 
 /** A race not started yet: its form, with what the user already said. */
@@ -154,6 +179,7 @@ export function blankRace(request: Partial<RaceRequest>): Race {
     check: request.check ?? null,
     checkFiles: request.checkFiles ?? null,
     decide: request.decide ?? "captain",
+    judge: request.judge ?? null,
     phase: "setup",
     size,
     racers: [],
@@ -162,6 +188,7 @@ export function blankRace(request: Partial<RaceRequest>): Race {
     votes: [],
     abstained: [],
     standings: null,
+    judging: null,
     picked: null,
     base: null,
     startedAt: Date.now(),
@@ -203,6 +230,24 @@ export function votePrompt(race: Race, voter: number) {
     : "";
   return `All racers of race ${race.id} have finished. Vote on the others' work: read each with race_peek (racers ${others.map(({ number }) => number).join(", ")}).${checked}
 Then call race_vote with their numbers, best first, and why in a few lines. Don't rank yourself, and don't run long jobs: vote in this turn.`;
+}
+
+export function judgePrompt(race: Race) {
+  const finished = race.racers.filter(({ state }) => state === "finished");
+  return `You judge race ${race.id}: ${race.size} agents worked on the task below at once, each in a git worktree of its own. Score how well each finished racer's work does the task.
+
+The task:
+
+${race.task}
+
+The racers that finished:
+${finished.map((racer) => racerSummary(race, racer)).join("\n")}
+
+How to judge:
+- Read each one's work with race_peek (racers ${finished.map(({ number }) => number).join(", ")}), and its files in its folder where you need more.
+- Judge it against the task: does it do all of it, correctly, and how well is it made: clear, no bigger than it needs to be, tested where the task asks. A passing check doesn't prove the task is done, and a failing one doesn't make the work worthless.
+- Don't change any files, and don't run long jobs: you only read and judge, in this turn.
+- Then call race_judge with a score from 0 to 10 for each of them and why in a few lines, and a summary of what set the best apart.`;
 }
 
 /**
@@ -251,6 +296,25 @@ export function refusalOfVote(race: Race, voter: number, ranking: number[]): str
   return `Rank each of the other racers that finished exactly once, best first: ${others.join(", ")}.`;
 }
 
+/** Why scores aren't ones this race's judge can give, or null when they are. */
+export function refusalOfScores(race: Race, scores: Score[]): string | null {
+  const finished = race.racers.filter(({ state }) => state === "finished").map(({ number }) => number);
+  const sorted = scores.map(({ racer }) => racer).sort((one, other) => one - other);
+  const eachOnce = sorted.length === finished.length && sorted.every((racer, index) => racer === finished[index]);
+  const inRange = scores.every(({ score }) => Number.isInteger(score) && score >= 0 && score <= MAX_SCORE);
+  if (eachOnce && inRange) return null;
+  return `Score each racer that finished exactly once, from 0 to 10: ${finished.join(", ")}.`;
+}
+
+/** What the judge said of the racers' work, best first, for the captain. */
+export function scoresWords(judging: Judging) {
+  if (judging.scores.length === 0) return `The judge (${judging.profile}) gave no scores: ${judging.missed}.`;
+  const lines = [...judging.scores]
+    .sort((one, other) => other.score - one.score || one.racer - other.racer)
+    .map(({ racer, score, why }) => `- Racer ${racer}: ${score}/10. ${why}`);
+  return `The judge (${judging.profile}) scored their work against the task:\n${lines.join("\n")}${judging.summary ? `\n${judging.summary}` : ""}`;
+}
+
 const ago = (at: number, now: number) => {
   const minutes = Math.round((now - at) / 60_000);
   return minutes < 1 ? "just now" : `${minutes} min ago`;
@@ -277,13 +341,14 @@ function racerSummary(race: Race, racer: Racer) {
   return `- Racer ${racer.number} (${racer.profile}): ${racer.state} · branch ${racer.branch} · folder ${racer.folder} · ${racer.changes ?? "changes unknown"}${check}${said}`;
 }
 
-/** How the race ended: each racer's branch, folder, changes, check and words, and the vote. */
+/** How the race ended: each racer's branch, folder, changes, check and words, the vote, and the judge's scores. */
 function results(race: Race) {
   const finished = race.racers.filter(({ state }) => state === "finished");
   const vote = race.standings
     ? `\n\nThe racers voted: ${standingsWords(race, race.standings)}${race.votes.map(({ racer, ranking, why }) => `\n- Racer ${racer} ${rankingWords(ranking)}: ${why}`).join("")}`
     : "";
-  return `Race ${race.id} is over: ${finished.length} of ${race.racers.length} racers finished. Each worked on a branch of its own, from ${baseWords(race)}:\n${race.racers.map((racer) => racerSummary(race, racer)).join("\n")}${vote}`;
+  const judged = race.judging && (race.judging.scores.length > 0 || race.judging.missed) ? `\n\n${scoresWords(race.judging)}` : "";
+  return `Race ${race.id} is over: ${finished.length} of ${race.racers.length} racers finished. Each worked on a branch of its own, from ${baseWords(race)}:\n${race.racers.map((racer) => racerSummary(race, racer)).join("\n")}${vote}${judged}`;
 }
 
 const nobodyFinished = (race: Race) => race.racers.every(({ state }) => state !== "finished");

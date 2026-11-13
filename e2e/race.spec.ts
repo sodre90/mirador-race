@@ -299,6 +299,28 @@ test("/race:race with a task and a profile starts the race at once, and ticking 
   await expect(view.getByText("You asked to combine racers 1, 2; the conversation that started the race is on it.")).toBeVisible();
 });
 
+test("a race with a judge starts it once the racers are checked, and goes on to the pick when the judge ends without scoring, saying so", async ({ page }) => {
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  const composer = page.locator(".composer:visible textarea");
+  await composer.fill(`/race:race task="FOLDER judged" profile=${profileName} racers=2 judge=${profileName}`);
+  await composer.press("Enter");
+  await expect(page.locator(".plugin-command-reply:visible")).toContainText("When all have finished, you pick the work to take on the race page.");
+  const raceId = (await page.locator(".plugin-command-reply:visible").textContent())!.match(/Race (\w+) started/)![1]!;
+  const view = helpers().walkthroughView(page);
+  await expect(view.getByRole("heading", { name: `Race ${raceId}` })).toBeVisible();
+  await expect(view.locator(".race-head .meta"), "the meta line says who judges").toContainText(`judged by ${profileName}`);
+
+  await expect.poll(agentSaw, "the judge was given the task").toContain(`You judge race ${raceId}`);
+  const judgeRow = page.locator(".sidebar li[data-reorder-id]", { hasText: `Race ${raceId} · judge` });
+  if ((await judgeRow.count()) === 0) await page.locator(`.sidebar li[data-reorder-id="${captainId}"] .delegated-toggle`).click();
+  await expect(judgeRow, "the judge's conversation shows under the captain").toHaveCount(1);
+
+  await expect(view.getByText("The judge (racer) gave no scores: it ended its turn without scoring.")).toBeVisible();
+  await expect(view.getByRole("table", { name: "Results" }).getByRole("columnheader", { name: "Judge" })).toBeVisible();
+  await expect.poll(agentSaw, "the captain hears the judge gave no scores").toContain("The judge (racer) gave no scores");
+});
+
 test("a check a restart of Mirador cut short runs again once the race page shows, and the race then waits for the user's pick", async ({ page }) => {
   const release = join(host.root, "release-checks");
   const check = join(host.root, "check.sh");

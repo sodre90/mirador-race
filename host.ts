@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import type { CanvasActionContext, CanvasHost, CanvasPluginContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivityEvent, StartedConversation } from "./mirador/api.ts";
+import type { CanvasActionContext, CanvasHost, CanvasPluginContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivityEvent, PluginProfile, StartedConversation } from "./mirador/api.ts";
 import { CheckQueue, endLeftover, type StartedCheck } from "./check.ts";
 import { copyCheckFilesOver, putBackOwnFiles, type KeptOwnFiles } from "./check-files.ts";
 import { changesOf, diffOf, raceBase } from "./git.ts";
@@ -15,6 +15,7 @@ import {
   conversationWorks,
   cut,
   isWorking,
+  judgePrompt,
   newRaceId,
   pickMessage,
   pickWords,
@@ -23,6 +24,7 @@ import {
   raceRequest,
   raceTitle,
   racerPrompt,
+  refusalOfScores,
   refusalOfVote,
   tally,
   votePrompt,
@@ -31,12 +33,16 @@ import {
   type RacePick,
   type RaceRequest,
   type Racer,
+  type Score,
 } from "./race.ts";
 
 export const ITEM_TYPE = "race";
 
 /** The racer number a note of the conversation that started the race carries. */
 export const CAPTAIN = 0;
+
+/** The number membership gives the judge of a race. */
+export const JUDGE = -1;
 
 /** A changed file shows on the race page within this long of a racer's tool call. */
 const CHANGES_REFRESH_MS = 5_000;
@@ -56,6 +62,10 @@ interface KeptRacer {
   number: number;
 }
 
+interface KeptJudge {
+  race: string;
+}
+
 interface RaceInput {
   task?: string;
   profile?: string;
@@ -64,6 +74,7 @@ interface RaceInput {
   check?: string;
   checkFiles?: string;
   decide?: Decide;
+  judge?: string;
 }
 
 /** What a race's page asks of the plugin. */
@@ -81,6 +92,7 @@ type StartsRacers = CanvasPluginContext<Race> & Pick<CanvasActionContext<Race>, 
 
 const raceKey = (id: string) => `race:${id}`;
 const racerKey = (conversationId: string) => `racer:${conversationId}`;
+const judgeKey = (conversationId: string) => `judge:${conversationId}`;
 const readKey = (conversationId: string) => `read:${conversationId}`;
 /** A racer's running check, by its pid and start, which a restart of Mirador in place leaves running. */
 const startedCheckKey = (id: string, number: number) => `check:${id}:${number}`;
@@ -88,8 +100,8 @@ const startedCheckKey = (id: string, number: number) => `check:${id}:${number}`;
 const ownFilesKey = (id: string, number: number) => `ownFiles:${id}:${number}`;
 const RACES = "races";
 
-/** The conversations' contexts this run of Mirador has seen: the captain's to change its race page and tell it, a racer's to ask for its vote. */
-const captains = new Map<string, CanvasPluginContext<Race> & { prompt: CanvasActionContext["prompt"] }>();
+/** The conversations' contexts this run of Mirador has seen: the captain's to change its race page, tell it and start its judge, a racer's to ask for its vote. */
+const captains = new Map<string, StartsRacers>();
 const racerContexts = new Map<string, CanvasToolContext<Race>>();
 const refreshes = new Map<string, { running: boolean; last: number }>();
 /** The forms whose Start is starting their race, so a second press doesn't start it twice. */
@@ -100,6 +112,7 @@ const checksUnderWay = new Set<string>();
 
 const keptRace = (storage: CanvasPluginStorage, id: string) => storage.get(raceKey(id)) as KeptRace | undefined;
 const keptRacer = (storage: CanvasPluginStorage, conversationId: string) => storage.get(racerKey(conversationId)) as KeptRacer | undefined;
+const keptJudge = (storage: CanvasPluginStorage, conversationId: string) => storage.get(judgeKey(conversationId)) as KeptJudge | undefined;
 const raceIds = (storage: CanvasPluginStorage) => (storage.get(RACES) as string[] | undefined) ?? [];
 
 /** Changes the race in one go, with no await in between, so racers calling at once never undo each other's change; the race page follows. */
@@ -126,6 +139,11 @@ function membership(storage: CanvasPluginStorage, conversationId: string): { kep
   if (racer) {
     const kept = keptRace(storage, racer.race);
     return kept ? { kept, number: racer.number } : null;
+  }
+  const judge = keptJudge(storage, conversationId);
+  if (judge) {
+    const kept = keptRace(storage, judge.race);
+    return kept ? { kept, number: JUDGE } : null;
   }
   const led = raceIds(storage)
     .map((id) => keptRace(storage, id))
@@ -228,6 +246,7 @@ async function startFromForm(form: { id: string; data: Race }, asked: RaceInput,
   if (form.data.phase !== "setup" || startingForms.has(form.data.id)) throw new Error("This race has started already.");
   const request = raceRequest(asked);
   if (typeof request === "string") throw new Error(request);
+  request.judge = judgeProfile(request.judge, context.profiles());
   const problem = await checkFilesProblem(request.checkFiles);
   if (problem) throw new Error(problem);
   startingForms.add(form.data.id);
@@ -242,14 +261,14 @@ async function startFromForm(form: { id: string; data: Race }, asked: RaceInput,
   }
 }
 
-/** Once every racer's work has ended and been checked: the vote if the race asked for one and some racers can cast it, else the pick. */
+/** Once every racer's work has ended and been checked: the vote if the race asked for one and some racers can cast it, else the judge or the pick. */
 async function afterTheRace(storage: CanvasPluginStorage, id: string) {
   await refreshChanges(storage, id, { now: true });
   const kept = keptRace(storage, id);
   if (!kept || kept.race.racers.length < kept.race.size || kept.race.racers.some(isWorking) || kept.race.phase !== "racing") return;
   const finished = kept.race.racers.filter(({ state }) => state === "finished");
   const voters = kept.race.decide === "vote" && finished.length > 1 ? finished.filter(({ conversationId }) => racerContexts.has(conversationId)) : [];
-  if (voters.length === 0) return raceOver(storage, id);
+  if (voters.length === 0) return judgeOrOver(storage, id);
   update(storage, id, (race) => {
     race.phase = "voting";
     race.voters = voters.map(({ number }) => number);
@@ -274,12 +293,43 @@ async function raceOver(storage: CanvasPluginStorage, id: string) {
   await captain.prompt(pickingPrompt(kept.race), { afterTurn: true });
 }
 
-/** Every voter voted, or ended its turn without: the race is over, with the standings. */
+/** Every voter voted, or ended its turn without: the standings, then the judge or the pick. */
 async function countIfAllVoted(storage: CanvasPluginStorage, id: string) {
   const race = keptRace(storage, id)?.race;
   if (!race || race.phase !== "voting") return;
   const heard = new Set([...race.votes.map(({ racer }) => racer), ...race.abstained]);
-  if (race.voters.every((voter) => heard.has(voter))) await raceOver(storage, id);
+  if (race.voters.every((voter) => heard.has(voter))) await judgeOrOver(storage, id);
+}
+
+/** Once the vote is over, or there was none: the judge if the race asked for one and some racer finished, else the pick. */
+async function judgeOrOver(storage: CanvasPluginStorage, id: string) {
+  const race = keptRace(storage, id)?.race;
+  if (!race) return;
+  if (race.votes.length > 0) update(storage, id, (changed) => (changed.standings = tally(changed)));
+  if (race.judge && !race.judging && race.racers.some(({ state }) => state === "finished")) return startJudge(storage, id);
+  await raceOver(storage, id);
+}
+
+/** The judge reads the finished racers' work beside the captain; one that can't start lets the race go on without it. */
+async function startJudge(storage: CanvasPluginStorage, id: string) {
+  update(storage, id, (race) => {
+    race.phase = "judging";
+    race.judging = { profile: race.judge!, conversationId: null, scores: [], summary: null, missed: null };
+  });
+  const kept = keptRace(storage, id)!;
+  const captain = captains.get(kept.captain);
+  if (!captain) {
+    update(storage, id, (race) => (race.judging!.missed = "Mirador was restarted before it could start"));
+    return raceOver(storage, id);
+  }
+  try {
+    const started = await captain.startConversation({ profile: kept.race.judge!, prompt: judgePrompt(kept.race), title: `Race ${id} · judge` });
+    storage.set(judgeKey(started.id), { race: id } satisfies KeptJudge);
+    update(storage, id, (race) => (race.judging!.conversationId = started.id));
+  } catch (error) {
+    update(storage, id, (race) => (race.judging!.missed = `it couldn't start: ${(error as Error).message}`));
+    await raceOver(storage, id);
+  }
 }
 
 /** Marks how the racer's work ended; one that finished a race with a check is checked next. */
@@ -375,6 +425,11 @@ async function stopRace(id: string, context: CanvasActionContext<Race>) {
     if (race.phase === "racing") race.phase = "stopped";
   });
   if (!kept) throw new Error("This race is no longer kept.");
+  if (kept.race.phase === "judging") {
+    const judge = kept.race.judging?.conversationId;
+    if (judge) await context.stopConversation(judge);
+    return { stopped: true };
+  }
   checks.stopRace(id);
   await Promise.all(kept.race.racers.filter(conversationWorks).map(({ conversationId }) => context.stopConversation(conversationId)));
   return { stopped: true };
@@ -412,8 +467,18 @@ function publishForm(asked: RaceInput, context: CanvasToolContext<Race>) {
   context.publish({
     type: ITEM_TYPE,
     title: "New race",
-    data: blankRace({ task: asked.task?.trim(), profiles, size: asked.racers, check: asked.check?.trim() || null, checkFiles: asked.checkFiles?.trim() || null, decide: asked.decide }),
+    data: blankRace({ task: asked.task?.trim(), profiles, size: asked.racers, check: asked.check?.trim() || null, checkFiles: asked.checkFiles?.trim() || null, decide: asked.decide, judge: asked.judge?.trim() || null }),
   });
+}
+
+const noJudgeProfile = (judge: string) => `There is no profile named ${judge} for the judge.`;
+
+/** The judge's profile as Mirador spells it, or null for none; a name Mirador doesn't have is refused. */
+function judgeProfile(judge: string | null, profiles: PluginProfile[]): string | null {
+  if (!judge) return null;
+  const known = profiles.find(({ name }) => name.toLowerCase() === judge.toLowerCase());
+  if (!known) throw new Error(noJudgeProfile(judge));
+  return known.name;
 }
 
 /** Why the hidden check files can't be used: their folder isn't one that exists. */
@@ -429,6 +494,8 @@ async function draftProblem(asked: RaceInput, context: CanvasToolContext<Race>):
   const known = context.profiles().map(({ name }) => name.toLowerCase());
   const unknown = [...(asked.profiles ?? []), ...(asked.profile ? [asked.profile] : [])].filter((name) => !known.includes(name.trim().toLowerCase()));
   if (unknown.length > 0) return `There is no profile named ${unknown.join(", ")}. The profiles are: ${context.profiles().map(({ name }) => name).join(", ")}; or leave profiles out for the user to choose.`;
+  const judge = asked.judge?.trim() || null;
+  if (judge && !known.includes(judge.toLowerCase())) return noJudgeProfile(judge);
   return checkFilesProblem(asked.checkFiles?.trim() || null);
 }
 
@@ -474,6 +541,12 @@ const host: CanvasHost<Race> = {
             description: "A folder of check files the racers never get, such as hidden tests, as a full path. Just before Race runs the check in a racer's folder, it copies them over that folder at the same paths, and afterwards it puts back what the racer had, so a racer can't pass by changing the tests it was given. Keep the folder outside the workspace's repository, or uncommitted, so the racers don't branch with it, and give a check that runs the hidden files, e.g. the project's whole test suite.",
           },
           decide: { type: "string", enum: ["captain", "vote"], description: "captain (the default): the pick comes as soon as they finish. vote: the racers first rank each other's work." },
+          judge: {
+            type: "string",
+            minLength: 1,
+            description:
+              "A profile, by name, whose agent reads each finished racer's work against the task once the racers are checked and the vote is over, and scores it from 0 to 10 with reasons: for what a check can't tell, such as whether the work does the whole task, and how well it is made. Its scores order the results after the check.",
+          },
         },
       },
       async run(input, context) {
@@ -489,6 +562,7 @@ const host: CanvasHost<Race> = {
           publishForm(asked, context);
           return "Fill in the race on the canvas, then press Start race.";
         }
+        request.judge = judgeProfile(request.judge, context.profiles());
         const problem = await checkFilesProblem(request.checkFiles);
         if (problem) throw new Error(problem);
         const race = await startRace(newRace(request), context, (race) => context.publish({ type: ITEM_TYPE, title: raceTitle(race.task), data: race }).id);
@@ -507,6 +581,7 @@ const host: CanvasHost<Race> = {
         const member = membership(context.storage, context.conversationId);
         if (!member) throw notAMember();
         const { number } = member;
+        if (number === JUDGE) throw new Error("The judge reads the racers' work with race_peek and scores it with race_judge; the board is the racers'.");
         const id = member.kept.race.id;
         if (number === CAPTAIN) captains.set(context.conversationId, context);
         else racerContexts.set(context.conversationId, context);
@@ -521,7 +596,7 @@ const host: CanvasHost<Race> = {
       },
     },
     race_peek: {
-      description: "For a race's racers, and the conversation that started it: a racer's work so far, as a diff from where the race started, committed or not, new files included.",
+      description: "For a race's racers, the conversation that started it, and its judge: a racer's work so far, as a diff from where the race started, committed or not, new files included.",
       input: {
         type: "object",
         properties: { racer: { type: "integer", minimum: 1, description: "The racer's number." } },
@@ -530,7 +605,7 @@ const host: CanvasHost<Race> = {
       async run(input, context) {
         const member = membership(context.storage, context.conversationId);
         if (!member) throw notAMember();
-        if (member.number !== CAPTAIN) racerContexts.set(context.conversationId, context);
+        if (member.number > CAPTAIN) racerContexts.set(context.conversationId, context);
         return racerWork(context.storage, member.kept.race.id, (input as { racer: number }).racer);
       },
     },
@@ -546,7 +621,7 @@ const host: CanvasHost<Race> = {
       },
       async run(input, context) {
         const member = membership(context.storage, context.conversationId);
-        if (!member || member.number === CAPTAIN) throw new Error("Only a race's racers vote.");
+        if (!member || member.number <= CAPTAIN) throw new Error("Only a race's racers vote.");
         const { race } = member.kept;
         if (race.phase !== "voting" || !race.voters.includes(member.number)) throw new Error(`Race ${race.id} isn't asking you for a vote.`);
         if (race.votes.some(({ racer }) => racer === member.number)) throw new Error("You already voted.");
@@ -558,9 +633,59 @@ const host: CanvasHost<Race> = {
         return "Your vote is in. End your turn.";
       },
     },
+    race_judge: {
+      description: "For a race's judge: score each finished racer's work against the task, from 0 to 10, with why, and sum up what set the best apart.",
+      input: {
+        type: "object",
+        properties: {
+          scores: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              properties: {
+                racer: { type: "integer", minimum: 1 },
+                score: { type: "integer", minimum: 0, maximum: 10 },
+                why: { type: "string", minLength: 1 },
+              },
+              required: ["racer", "score", "why"],
+            },
+            description: "A score for each racer that finished, with why in a few lines.",
+          },
+          summary: { type: "string", minLength: 1, description: "What set the best apart, in a few lines." },
+        },
+        required: ["scores"],
+      },
+      async run(input, context) {
+        const member = membership(context.storage, context.conversationId);
+        if (!member || member.number !== JUDGE) throw new Error("Only a race's judge scores the racers' work.");
+        const { race } = member.kept;
+        if (race.phase !== "judging") throw new Error(`Race ${race.id} isn't waiting for scores.`);
+        if (race.judging!.scores.length > 0) throw new Error("You already scored them.");
+        const { scores, summary } = input as { scores: Score[]; summary?: string };
+        const refusal = refusalOfScores(race, scores);
+        if (refusal) throw new Error(refusal);
+        update(context.storage, race.id, (changed) => {
+          changed.judging!.scores = scores.map(({ racer, score, why }) => ({ racer, score, why: cut(why.trim(), NOTE_LIMIT) }));
+          changed.judging!.summary = summary?.trim() ? cut(summary.trim(), NOTE_LIMIT) : null;
+        });
+        await raceOver(context.storage, race.id);
+        return "Your scores are in. End your turn.";
+      },
+    },
   },
   async replied(started, reply, context) {
     captains.set(context.conversationId, context);
+    const judged = keptJudge(context.storage, started.id);
+    if (judged) {
+      const race = keptRace(context.storage, judged.race)?.race;
+      if (race?.phase === "judging" && race.judging!.scores.length === 0) {
+        const missed = { finished: "it ended its turn without scoring", stopped: "it was stopped", failed: "its conversation failed" }[reply.ended];
+        update(context.storage, judged.race, (changed) => (changed.judging!.missed = missed));
+        await raceOver(context.storage, judged.race);
+      }
+      return;
+    }
     const ended = racerEnded(context.storage, started.id, reply);
     if (!ended) return;
     if (ended.toCheck) await checkRacer(context.storage, ended.race, ended.number, ended.toCheck);
