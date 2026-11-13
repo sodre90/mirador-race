@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,6 +98,20 @@ test("a taken id, a folder that isn't a set, a missing check file, an empty chec
   await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
   await mirador.act({ kind: "deleteRacers" });
   await expect(keep(mirador, { id: "gone" })).rejects.toThrow("Racer 1 was deleted, so its folder is gone.");
+});
+
+test("a keep that fails partway leaves no half-written problem, so trying again isn't refused as taken", async () => {
+  const mirador = await racedOver();
+  const key = `race:${mirador.page().id}`;
+  const kept = mirador.captain.storage.get(key) as { race: { base: string | null } };
+  const base = kept.race.base;
+  mirador.captain.storage.set(key, { ...kept, race: { ...kept.race, base: "0".repeat(40) } });
+
+  await expect(keep(mirador)).rejects.toThrow("bad object");
+  expect(existsSync(join(set, "problems", "answer"))).toBe(false);
+
+  mirador.captain.storage.set(key, { ...kept, race: { ...kept.race, base } });
+  expect(await keep(mirador)).toMatchObject({ kept: "answer", validation: { validation: "valid" } });
 });
 
 test("a problem kept with no check files still loads, and its start branch keeps the base's files", async () => {

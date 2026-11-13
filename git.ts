@@ -2,13 +2,13 @@ import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
-async function git(folder: string, args: string[], env: Record<string, string> = {}) {
+export async function git(folder: string, args: string[], env: Record<string, string> = {}) {
   const child = Bun.spawn(["git", "-C", folder, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
   const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   return { stdout, stderr, exitCode };
 }
 
-async function mustGit(folder: string, args: string[], env: Record<string, string> = {}) {
+export async function mustGit(folder: string, args: string[], env: Record<string, string> = {}) {
   const result = await git(folder, args, env);
   if (result.exitCode !== 0) throw new Error(`git ${args[0]} failed in ${folder}: ${result.stderr.trim()}`);
   return result.stdout;

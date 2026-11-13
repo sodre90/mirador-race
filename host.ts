@@ -7,7 +7,7 @@ import { checks, endLeftover, type StartedCheck } from "./check.ts";
 import { copyCheckFilesOver, putBackOwnFiles, type KeptOwnFiles } from "./check-files.ts";
 import { BENCH_ITEM_TYPE, benchAction, benchActivity, benchItem, benchRacerEnded, benchRacerOf, benchTool } from "./bench-host.ts";
 import type { BenchRun } from "./bench.ts";
-import { changesOf, diffOf, raceBase } from "./git.ts";
+import { changesOf, diffOf, git, mustGit, raceBase } from "./git.ts";
 import { isProblemId, loadSet, validateProblem, type ProblemValidation } from "./sets.ts";
 import {
   DIFF_LIMIT,
@@ -537,18 +537,6 @@ async function deleteRacers(id: string, context: CanvasActionContext<Race | Benc
   return { deleted };
 }
 
-async function git(folder: string, args: string[], env: Record<string, string> = {}) {
-  const child = Bun.spawn(["git", "-C", folder, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-  return { stdout, stderr, exitCode };
-}
-
-async function mustGit(folder: string, args: string[], env: Record<string, string> = {}) {
-  const { stdout, stderr, exitCode } = await git(folder, args, env);
-  if (exitCode !== 0) throw new Error(`git ${args[0]} failed in ${folder}: ${stderr.trim()}`);
-  return stdout;
-}
-
 const isFile = (path: string) => stat(path).then((each) => each.isFile(), () => false);
 
 async function copyInto(from: string, to: string) {
@@ -616,15 +604,20 @@ async function keepProblem(id: string, asked: { setFolder: string; id: string; r
   if (!base) throw new Error("The race's base commit isn't known yet; look again in a minute.");
   const check = asked.check.trim();
   const problemFolder = join(set.folder, "problems", asked.id);
-  await mkdir(join(problemFolder, "check"), { recursive: true });
-  await mkdir(join(problemFolder, "reference"), { recursive: true });
-  await writeFile(join(problemFolder, "problem.json"), `${JSON.stringify({ start: `start/${asked.id}`, check, tags: ["kept"] }, null, 2)}\n`);
-  await writeFile(join(problemFolder, "task.md"), race.task);
-  for (const path of checkFiles) await copyInto(join(racer.folder, path), join(problemFolder, "check", path));
-  const changed = await changedFilesSince(racer.folder, base);
-  const reference = (await Promise.all(changed.filter((path) => !checkFiles.includes(path)).map(async (path) => ((await isFile(join(racer.folder, path))) ? path : null)))).filter((path): path is string => path !== null);
-  for (const path of reference) await copyInto(join(racer.folder, path), join(problemFolder, "reference", path));
-  await startCommitOf(racer.folder, base, checkFiles, asked.id, set.folder);
+  try {
+    await mkdir(join(problemFolder, "check"), { recursive: true });
+    await mkdir(join(problemFolder, "reference"), { recursive: true });
+    await writeFile(join(problemFolder, "problem.json"), `${JSON.stringify({ start: `start/${asked.id}`, check, tags: ["kept"] }, null, 2)}\n`);
+    await writeFile(join(problemFolder, "task.md"), race.task);
+    for (const path of checkFiles) await copyInto(join(racer.folder, path), join(problemFolder, "check", path));
+    const changed = await changedFilesSince(racer.folder, base);
+    const reference = (await Promise.all(changed.filter((path) => !checkFiles.includes(path)).map(async (path) => ((await isFile(join(racer.folder, path))) ? path : null)))).filter((path): path is string => path !== null);
+    for (const path of reference) await copyInto(join(racer.folder, path), join(problemFolder, "reference", path));
+    await startCommitOf(racer.folder, base, checkFiles, asked.id, set.folder);
+  } catch (error) {
+    await rm(problemFolder, { recursive: true, force: true });
+    throw error;
+  }
   const reloaded = await loadSet(set.folder);
   const problem = reloaded.problems.find((each) => each.id === asked.id);
   const validation = problem
