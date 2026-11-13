@@ -115,6 +115,7 @@ test("the agent's race waits as a filled-in form for the user's Start, then star
     await expect(view.locator(".lane .state-finished")).toHaveCount(2);
     await expect(view.getByRole("table", { name: "Results" }).getByRole("button", { name: "Take this" })).toHaveCount(2);
     await expect(view.locator(".lane .check")).toHaveCount(2);
+    await expect(view.getByRole("region", { name: "Podium" }).locator(".step"), "both racers' work passed the check, so both earn a place").toHaveCount(2);
     await helpers().untilFramePainted(page, raceFrame(page));
   });
 
@@ -166,17 +167,26 @@ test("Stop race on the race page stops the racers still working, and the captain
   await helpers().signIn(page, host);
   await page.goto(`${host.origin}/#/c/${captainId}`);
   const composer = page.locator(".composer:visible textarea");
-  await composer.fill(`/race:race task="STOPPED QUIET until the race is stopped" profile=${profileName} racers=2`);
+  await composer.fill(`/race:race task="STOPPED QUIET until the race is stopped. ${"Keep going until then. ".repeat(12).trim()}" profile=${profileName} racers=2`);
   await composer.press("Enter");
   const raceId = (await page.locator(".plugin-command-reply:visible").textContent())!.match(/Race (\w+) started/)![1]!;
   const view = helpers().walkthroughView(page);
   await expect(view.getByRole("heading", { name: `Race ${raceId}` })).toBeVisible();
   await expect(view.locator(".lane .state-working")).toHaveCount(2);
+  await expect(view.locator(".lane.running"), "a working racer's marker runs on its lane").toHaveCount(2);
+
+  await expect(view.locator(".task"), "a long task shows folded").toHaveClass(/folded/);
+  await view.getByRole("button", { name: "Show the whole task" }).click();
+  await expect(view.locator(".task")).not.toHaveClass(/folded/);
+  await expect(view.locator(".task")).toContainText("Keep going until then.");
+  await view.getByRole("button", { name: "Fold the task" }).click();
+  await expect(view.locator(".task")).toHaveClass(/folded/);
 
   await helpers().untilFramePainted(page, raceFrame(page));
   await view.getByRole("button", { name: "Stop race" }).click();
   await expect(view.getByText("Stopped ·", { exact: false })).toBeVisible();
   await expect(view.locator(".lane .state-stopped")).toHaveCount(2);
+  await expect(view.locator(".lane.running")).toHaveCount(0);
   await expect(view.getByRole("button", { name: "Stop race" })).toHaveCount(0);
 
   await sendAndWait(page, "SAY Carrying on.");
@@ -226,6 +236,12 @@ test("/race:race with nothing after it shows a form, whose race waits for the us
   await expect(lane.locator(".check pre"), "what Race's run of the user's check printed in racer 1's folder").toContainText(/^checked in \/.+\/\S+\n?$/);
   expect(agentSaw()).toMatch(/- Racer 1 \(racer\): finished · .* · check passed in [\d.]+ s/);
 
+  const podium = view.getByRole("region", { name: "Podium" });
+  await expect(podium.locator(".step"), "both racers' work passed the check, so both earn a place").toHaveCount(2);
+  expect((await view.locator(".lane .place").allTextContents()).toSorted()).toEqual(["1st", "2nd"]);
+  const winner = await podium.locator(".step-1").getAttribute("data-racer");
+  await expect(view.locator(`.lane[data-racer="${winner}"] .place`), "the lanes and the podium agree on the winner").toHaveText("1st");
+
   await results.locator('tr[data-racer="2"]').getByRole("button", { name: "Take this" }).click();
   await expect.poll(agentSaw).toContain(`Take racer 2's work from race ${raceId} into your branch:`);
   await expect(page.locator(".timeline:visible .message.user").last()).toContainText(`Take racer 2's work from race ${raceId}`);
@@ -245,6 +261,8 @@ test("/race:race with a task and a profile starts the race at once, and ticking 
   const view = helpers().walkthroughView(page);
   await expect(view.getByRole("heading", { name: `Race ${raceId}` })).toBeVisible();
   await expect(view.getByText("Over: pick the work to take", { exact: false })).toBeVisible();
+  await expect(view.getByRole("region", { name: "Podium" }), "the race has no check, so no work earned a place").toHaveCount(0);
+  await expect(view.locator(".lane .place")).toHaveCount(0);
   const results = view.getByRole("table", { name: "Results" });
   await helpers().untilFramePainted(page, raceFrame(page));
   for (const number of [1, 2]) await results.locator(`tr[data-racer="${number}"]`).getByRole("checkbox", { name: "Combine" }).check();

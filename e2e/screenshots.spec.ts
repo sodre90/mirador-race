@@ -158,6 +158,7 @@ async function racerConversations(page: Page, captainId: string, raceId: string)
  * the workspace sits in a temp folder.
  */
 async function tidyForScreenshot(page: Page, view: FrameLocator) {
+  await expect(view.locator(".confetti"), "a passing check's confetti falls on the page for a few seconds").toHaveCount(0, { timeout: 10_000 });
   await view.locator(".task").evaluate((element, command) => (element.textContent = element.textContent!.replace(command, "")), WORKS_UNTIL_STOPPED);
   await page.evaluate(
     ({ command, request }) => {
