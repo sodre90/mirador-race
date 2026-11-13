@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import host, { ITEM_TYPE } from "../host.ts";
+import host, { ITEM_TYPE, WAITING } from "../host.ts";
 import { runCheck, CheckQueue, endLeftover, type RunningCheck } from "../check.ts";
 import { copyCheckFilesOver } from "../check-files.ts";
 import { checkWords, raceRequest, tally, type CheckResult, type Race, type Racer } from "../race.ts";
@@ -13,6 +13,9 @@ let scratch: string;
 let repo: string;
 
 const fakeMirador = (options: { refuseRacer?: number; refuseDelete?: (conversationId: string) => boolean; caller?: "agent" | "user" } = {}) => fakeMiradorIn({ ...options, repo, scratch });
+
+const storedRace = (mirador: ReturnType<typeof fakeMirador>, id: string) => (mirador.storage.get(`race:${id}`) as { race: Race }).race;
+const waitingIndex = (mirador: ReturnType<typeof fakeMirador>) => (mirador.storage.get(WAITING) as Record<string, string[]> | undefined) ?? {};
 
 beforeEach(async () => {
   scratch = await realpath(await mkdtemp(join(tmpdir(), "race-test-")));
@@ -491,6 +494,101 @@ test("a pick asked again, after a captain turn ended since the first ask, waits 
 
   expect(mirador.page().workTakenAt).toBeNull();
   await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow("Delete the racers once the captain has taken their work.");
+});
+
+test("a captain's turn reads only its own waiting races, not another captain's or the whole race list", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  const mine = mirador.page().id;
+
+  const otherCaptain = mirador.contextOf("other-captain");
+  await mirador.call(otherCaptain, "race", { task: "Make answer 42 too", profile: "Qwen Flash", racers: 2 });
+  const otherItem = mirador.items.find((item) => item.type === ITEM_TYPE && item.conversationId === otherCaptain.conversationId)!;
+  const theirs = otherItem.data.id;
+  for (const number of [3, 4]) await mirador.replied(number, finished("done"));
+  await host.action!(otherItem, { kind: "pick", pick: { kind: "take", racer: 1 } }, otherCaptain);
+
+  mirador.reads.length = 0;
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  const read = [...mirador.reads];
+
+  expect(typeof storedRace(mirador, mine).workTakenAt).toBe("number");
+  expect(storedRace(mirador, theirs).workTakenAt).toBeNull();
+  expect(read).toContain(`race:${mine}`);
+  expect(read).not.toContain(`race:${theirs}`);
+  expect(read).not.toContain("races");
+});
+
+test("a race leaves the waiting index once its racers are deleted, and its captain's later turns don't write it", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  const id = mirador.page().id;
+  const takenAt = storedRace(mirador, id).workTakenAt;
+  expect(typeof takenAt).toBe("number");
+  expect(waitingIndex(mirador)[mirador.captain.conversationId]).toContain(id);
+
+  expect(await mirador.act({ kind: "deleteRacers" })).toEqual({ deleted: 2 });
+  expect(waitingIndex(mirador)[mirador.captain.conversationId] ?? []).not.toContain(id);
+
+  mirador.reads.length = 0;
+  mirador.writes.length = 0;
+  await mirador.captainHeard({ kind: "turn-started" });
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  const read = [...mirador.reads];
+  const wrote = [...mirador.writes];
+
+  expect(storedRace(mirador, id).workTakenAt).toBe(takenAt);
+  expect(read).not.toContain(`race:${id}`);
+  expect(wrote).not.toContain(`race:${id}`);
+});
+
+test("a captain's turn that leaves workTakenAt as it was doesn't write the race", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  const id = mirador.page().id;
+  const takenAt = storedRace(mirador, id).workTakenAt;
+  expect(typeof takenAt).toBe("number");
+
+  mirador.writes.length = 0;
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  expect(storedRace(mirador, id).workTakenAt).toBe(takenAt);
+  expect(mirador.writes).not.toContain(`race:${id}`);
+
+  await mirador.captainHeard({ kind: "turn-started" });
+  mirador.writes.length = 0;
+  await mirador.captainHeard({ kind: "turn-started" });
+  expect(storedRace(mirador, id).workTakenAt).toBeNull();
+  expect(mirador.writes).not.toContain(`race:${id}`);
+});
+
+test("with the waiting index missing, the first turn builds it from the races kept before, and the waiting race gets its workTakenAt", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+  const id = mirador.page().id;
+  await mirador.call(mirador.captain, "race", { task: "Still racing", profile: "Qwen Flash", racers: 2 });
+  const racing = mirador.items.filter((item) => item.type === ITEM_TYPE && item.conversationId === mirador.captain.conversationId).at(-1)!.data.id;
+  mirador.storage.set(WAITING, undefined);
+  expect(mirador.storage.get(WAITING)).toBeUndefined();
+
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+
+  expect(waitingIndex(mirador)[mirador.captain.conversationId]).toEqual([id]);
+  expect(typeof storedRace(mirador, id).workTakenAt).toBe("number");
+  expect(storedRace(mirador, racing).workTakenAt).toBeNull();
 });
 
 test("a race stored without the new fields, as Race 0.4.0 left it, shows no racer deleted and refuses deleteRacers in deciding", async () => {

@@ -106,6 +106,8 @@ const startedCheckKey = (id: string, number: number) => `check:${id}:${number}`;
 /** What a racer's folder had before the hidden check files went over it, which a check a restart cut short leaves to put back. */
 const ownFilesKey = (id: string, number: number) => `ownFiles:${id}:${number}`;
 const RACES = "races";
+/** The races waiting for their captain's pick, by the captain's conversation id, so a turn reads only its own captain's. */
+export const WAITING = "waiting";
 /** The set folder a problem was last kept in, which the keep form defaults to. */
 const LAST_SET_FOLDER = "lastSetFolder";
 
@@ -481,10 +483,11 @@ function racePicking(id: string, storage: CanvasPluginStorage) {
 /** The message that hands the user's pick to the captain, which the page sends as their own. */
 function pick(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
   const message = pickMessage(racePicking(id, storage), chosen);
-  update(storage, id, (race) => {
+  const kept = update(storage, id, (race) => {
     race.pickAskedAt = Date.now();
     race.workTakenAt = null;
   });
+  if (kept) joinWaiting(storage, kept);
   return { message };
 }
 
@@ -501,19 +504,67 @@ function picked(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
 /** Whether the page may delete the racers: a stopped race, or one whose work the captain has taken. */
 const canDeleteRacers = (race: Race) => race.phase === "stopped" || (race.phase === "deciding" && typeof race.workTakenAt === "number");
 
+/** Whether the race still waits for its captain: picking or deciding, the pick asked, and a racer left to delete. */
+const waitsForCaptain = ({ phase, pickAskedAt, racers }: Race) =>
+  (phase === "picking" || phase === "deciding") && typeof pickAskedAt === "number" && racers.some(({ deletedAt }) => typeof deletedAt !== "number");
+
+/** The index of the races waiting for their captain, built once from the race list when storage from before it has none. */
+function waitingRaces(storage: CanvasPluginStorage): Record<string, string[]> {
+  const waiting = storage.get(WAITING) as Record<string, string[]> | undefined;
+  if (waiting) return waiting;
+  const built: Record<string, string[]> = {};
+  for (const id of raceIds(storage)) {
+    const kept = keptRace(storage, id);
+    if (!kept || !waitsForCaptain(kept.race)) continue;
+    (built[kept.captain] ??= []).push(id);
+  }
+  storage.set(WAITING, built);
+  return built;
+}
+
+function setWaiting(storage: CanvasPluginStorage, waiting: Record<string, string[]>, captain: string, ids: string[]) {
+  if (ids.length > 0) waiting[captain] = ids;
+  else delete waiting[captain];
+  storage.set(WAITING, waiting);
+}
+
+/** Adds the race to its captain's waiting races once the pick is asked. */
+function joinWaiting(storage: CanvasPluginStorage, { race, captain }: KeptRace) {
+  const waiting = waitingRaces(storage);
+  const ids = waiting[captain] ?? [];
+  if (ids.includes(race.id)) return;
+  setWaiting(storage, waiting, captain, [...ids, race.id]);
+}
+
+/** Takes the race out of its captain's waiting races once it can no longer wait for it. */
+function leaveWaiting(storage: CanvasPluginStorage, { race, captain }: KeptRace) {
+  const waiting = waitingRaces(storage);
+  const ids = waiting[captain];
+  if (!ids?.includes(race.id)) return;
+  setWaiting(storage, waiting, captain, ids.filter((each) => each !== race.id));
+}
+
 /**
  * The captain's turn after the pick takes the work when it ends, and a later turn starting means it isn't taken yet:
- * the pick's message may fold into the turn it is in, queue behind it, or start one of its own.
+ * the pick's message may fold into the turn it is in, queue behind it, or start one of its own. Reads only this
+ * captain's waiting races, and writes a race only when its workTakenAt changes.
  */
 function hearCaptain(event: PluginActivityEvent, storage: CanvasPluginStorage) {
   if (event.kind !== "turn-started" && event.kind !== "turn-ended") return;
-  for (const id of raceIds(storage)) {
+  const waiting = waitingRaces(storage);
+  const ids = waiting[event.conversationId] ?? [];
+  const stillWaiting: string[] = [];
+  for (const id of ids) {
     const kept = keptRace(storage, id);
-    if (!kept || kept.captain !== event.conversationId) continue;
-    const { phase, pickAskedAt } = kept.race;
-    if ((phase !== "picking" && phase !== "deciding") || typeof pickAskedAt !== "number" || pickAskedAt > event.at) continue;
+    if (!kept || !waitsForCaptain(kept.race)) continue;
+    stillWaiting.push(id);
+    const { pickAskedAt, workTakenAt } = kept.race;
+    if (pickAskedAt! > event.at) continue;
+    if (event.kind === "turn-ended" && typeof workTakenAt === "number") continue;
+    if (event.kind === "turn-started" && workTakenAt === null) continue;
     update(storage, id, (race) => (race.workTakenAt = event.kind === "turn-ended" ? event.at : null));
   }
+  if (stillWaiting.length !== ids.length) setWaiting(storage, waiting, event.conversationId, stillWaiting);
 }
 
 /** Deletes each racer's conversation and worktree, as the user's delete does, keeping its changes as its patch on the page. */
@@ -554,6 +605,8 @@ async function deleteRacers(id: string, context: CanvasActionContext<Race | Benc
   } finally {
     deletingRacers.delete(id);
   }
+  const after = keptRace(context.storage, id);
+  if (after && after.race.racers.every(({ deletedAt }) => typeof deletedAt === "number")) leaveWaiting(context.storage, after);
   if (failed.length > 0) throw new Error(`Racer${failed.length === 1 ? "" : "s"} ${failed.map(({ number }) => number).join(", ")} couldn't be deleted: ${failed[0]!.why}`);
   return { deleted };
 }

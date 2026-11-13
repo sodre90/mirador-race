@@ -45,9 +45,19 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
   itemType?: string;
 }) {
   const kept = new Map<string, string>();
+  /** Every key the plugin read and wrote, in order, so a test can tell a turn touched only its own captain's races. */
+  const reads: string[] = [];
+  const writes: string[] = [];
   const storage: CanvasPluginStorage = {
-    get: (key) => (kept.has(key) ? JSON.parse(kept.get(key)!) : undefined),
-    set: (key, value) => (value === undefined ? kept.delete(key) : kept.set(key, JSON.stringify(value))),
+    get: (key) => {
+      reads.push(key);
+      return kept.has(key) ? JSON.parse(kept.get(key)!) : undefined;
+    },
+    set: (key, value) => {
+      writes.push(key);
+      if (value === undefined) kept.delete(key);
+      else kept.set(key, JSON.stringify(value));
+    },
   };
   const items: (PluginItem<Data> & { conversationId: string })[] = [];
   const prompts: { conversationId: string; text: string; afterTurn: boolean }[] = [];
@@ -123,5 +133,5 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
   const captainHeard = (activity: PluginActivity) =>
     host.activity!({ ...activity, conversationId: captain.conversationId, conversationTitle: "", at: Date.now() } as never, { storage, windowChanged() {}, profileSetting: () => null, profiles: () => PROFILES, settingOfProfile: () => null });
   const promptsTo = (conversationId: string) => prompts.filter((prompt) => prompt.conversationId === conversationId);
-  return { captain, contextOf, call, page, racer, replied, judgeReplied, heard, captainHeard, prompts, promptsTo, stopped, deleted, started, beside, items, raceItem, act };
+  return { captain, contextOf, call, page, racer, replied, judgeReplied, heard, captainHeard, prompts, promptsTo, stopped, deleted, started, beside, items, raceItem, act, reads, writes, storage };
 }
