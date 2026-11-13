@@ -1,11 +1,14 @@
 import { existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import type { CanvasActionContext, CanvasHost, CanvasPluginContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivityEvent, PluginItem, PluginProfile, StartedConversation } from "./mirador/api.ts";
 import { checks, endLeftover, type StartedCheck } from "./check.ts";
 import { copyCheckFilesOver, putBackOwnFiles, type KeptOwnFiles } from "./check-files.ts";
 import { BENCH_ITEM_TYPE, benchAction, benchActivity, benchItem, benchRacerEnded, benchRacerOf, benchTool } from "./bench-host.ts";
 import type { BenchRun } from "./bench.ts";
 import { changesOf, diffOf, raceBase } from "./git.ts";
+import { isProblemId, loadSet, validateProblem, type ProblemValidation } from "./sets.ts";
 import {
   DIFF_LIMIT,
   MAX_RACERS,
@@ -86,7 +89,9 @@ type PageAction =
   | { kind: "resume" }
   | { kind: "pick"; pick: RacePick }
   | { kind: "picked"; pick: RacePick }
-  | { kind: "deleteRacers" };
+  | { kind: "deleteRacers" }
+  | { kind: "keepDefault" }
+  | { kind: "keep-problem"; setFolder: string; id: string; racer: number; checkFiles: string[]; check: string };
 
 /** What starting a race takes of the conversation it starts from, a tool's call or the user's press on the form. */
 type StartsRacers = CanvasPluginContext<Race | BenchRun> & Pick<CanvasActionContext<Race | BenchRun>, "startConversation" | "stopConversation" | "prompt">;
@@ -100,6 +105,8 @@ const startedCheckKey = (id: string, number: number) => `check:${id}:${number}`;
 /** What a racer's folder had before the hidden check files went over it, which a check a restart cut short leaves to put back. */
 const ownFilesKey = (id: string, number: number) => `ownFiles:${id}:${number}`;
 const RACES = "races";
+/** The set folder a problem was last kept in, which the keep form defaults to. */
+const LAST_SET_FOLDER = "lastSetFolder";
 
 /** The conversations' contexts this run of Mirador has seen: the captain's to change its race page, tell it and start its judge, a racer's to ask for its vote. */
 const captains = new Map<string, StartsRacers>();
@@ -530,6 +537,103 @@ async function deleteRacers(id: string, context: CanvasActionContext<Race | Benc
   return { deleted };
 }
 
+async function git(folder: string, args: string[], env: Record<string, string> = {}) {
+  const child = Bun.spawn(["git", "-C", folder, ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
+  const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  return { stdout, stderr, exitCode };
+}
+
+async function mustGit(folder: string, args: string[], env: Record<string, string> = {}) {
+  const { stdout, stderr, exitCode } = await git(folder, args, env);
+  if (exitCode !== 0) throw new Error(`git ${args[0]} failed in ${folder}: ${stderr.trim()}`);
+  return stdout;
+}
+
+const isFile = (path: string) => stat(path).then((each) => each.isFile(), () => false);
+
+async function copyInto(from: string, to: string) {
+  await mkdir(dirname(to), { recursive: true });
+  await copyFile(from, to);
+  await chmod(to, (await stat(from)).mode);
+}
+
+/** Every file the racer changed or added since the base, committed or not, new files included; deletions left out. */
+async function changedFilesSince(folder: string, base: string): Promise<string[]> {
+  const changed = await mustGit(folder, ["diff", "--name-only", "--diff-filter=d", base]);
+  const untracked = await mustGit(folder, ["ls-files", "--others", "--exclude-standard"]);
+  return [...new Set([...changed.split("\n"), ...untracked.split("\n")])].filter(Boolean);
+}
+
+/**
+ * The racer's starting tree as a commit on the set's start/<id> branch: the race's base tree minus the check files,
+ * built with a scratch index so the racer's own index and files stay untouched, then fetched into the set's repository.
+ */
+async function startCommitOf(racerFolder: string, base: string, checkFiles: string[], id: string, setFolder: string): Promise<string> {
+  const temp = await mkdtemp(join(tmpdir(), "race-keep-"));
+  try {
+    const env = { GIT_INDEX_FILE: join(temp, "index") };
+    await mustGit(racerFolder, ["read-tree", base], env);
+    if (checkFiles.length > 0) await mustGit(racerFolder, ["rm", "--cached", "--quiet", "--ignore-unmatch", "--", ...checkFiles], env);
+    const tree = (await mustGit(racerFolder, ["write-tree"], env)).trim();
+    const commit = (await mustGit(racerFolder, ["commit-tree", tree, "-m", `Start of ${id}`], env)).trim();
+    await mustGit(setFolder, ["fetch", racerFolder, commit]);
+    await mustGit(setFolder, ["update-ref", `refs/heads/start/${id}`, commit]);
+    return commit;
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+}
+
+/** Why the keep form's answers can't become a problem of the set, or null when they can. */
+async function keepRefusal(race: Race, setFolder: string, asked: { id: string; racer: number; checkFiles: string[]; check: string }): Promise<string | null> {
+  if (!isProblemId(asked.id)) return "A problem's id is lower-case letters, digits and dashes, at most 40.";
+  const branchTaken = (await git(setFolder, ["rev-parse", "--verify", "--quiet", `refs/heads/start/${asked.id}`])).exitCode === 0;
+  if (existsSync(join(setFolder, "problems", asked.id)) || branchTaken) return `The set has a problem ${asked.id} already.`;
+  if (!asked.check.trim()) return "Give the check command.";
+  const racer = race.racers.find((each) => each.number === asked.racer);
+  if (!racer) return `Race ${race.id} has racers 1 to ${race.racers.length}.`;
+  if (typeof racer.deletedAt === "number") return `Racer ${asked.racer} was deleted, so its folder is gone.`;
+  if (racer.state !== "finished") return `Racer ${asked.racer} hasn't finished its work.`;
+  for (const path of asked.checkFiles) {
+    if (isAbsolute(path) || path.split("/").includes("..")) return `A check file's path is relative to the racer's folder: ${path}.`;
+    if (!(await isFile(join(racer.folder, path)))) return `Racer ${asked.racer}'s folder has no ${path}.`;
+  }
+  return null;
+}
+
+/** Keeps a finished racer's work as a problem of a set: its task, hidden check files, reference and start commit, then validates it. */
+async function keepProblem(id: string, asked: { setFolder: string; id: string; racer: number; checkFiles: string[]; check: string }, context: CanvasActionContext<Race | BenchRun>): Promise<{ kept: string; validation: ProblemValidation }> {
+  const kept = keptRace(context.storage, id);
+  if (!kept) throw new Error("This race is no longer kept.");
+  const race = kept.race;
+  if (race.phase !== "picking" && race.phase !== "deciding") throw new Error("Keep a problem once the race is over and waits for the pick.");
+  const set = await loadSet(asked.setFolder);
+  const checkFiles = [...new Set(asked.checkFiles.map((path) => path.trim()).filter(Boolean))];
+  const refusal = await keepRefusal(race, set.folder, { ...asked, checkFiles });
+  if (refusal) throw new Error(refusal);
+  const racer = race.racers.find((each) => each.number === asked.racer)!;
+  const base = race.base ?? (await raceBase(racer.folder, race.racers.filter((each) => typeof each.deletedAt !== "number").map((each) => each.branch)));
+  if (!base) throw new Error("The race's base commit isn't known yet; look again in a minute.");
+  const check = asked.check.trim();
+  const problemFolder = join(set.folder, "problems", asked.id);
+  await mkdir(join(problemFolder, "check"), { recursive: true });
+  await mkdir(join(problemFolder, "reference"), { recursive: true });
+  await writeFile(join(problemFolder, "problem.json"), `${JSON.stringify({ start: `start/${asked.id}`, check, tags: ["kept"] }, null, 2)}\n`);
+  await writeFile(join(problemFolder, "task.md"), race.task);
+  for (const path of checkFiles) await copyInto(join(racer.folder, path), join(problemFolder, "check", path));
+  const changed = await changedFilesSince(racer.folder, base);
+  const reference = (await Promise.all(changed.filter((path) => !checkFiles.includes(path)).map(async (path) => ((await isFile(join(racer.folder, path))) ? path : null)))).filter((path): path is string => path !== null);
+  for (const path of reference) await copyInto(join(racer.folder, path), join(problemFolder, "reference", path));
+  await startCommitOf(racer.folder, base, checkFiles, asked.id, set.folder);
+  const reloaded = await loadSet(set.folder);
+  const problem = reloaded.problems.find((each) => each.id === asked.id);
+  const validation = problem
+    ? await validateProblem(reloaded, problem)
+    : { problem: asked.id, validation: "couldn't check" as const, output: reloaded.problemsLeftOut.find((each) => each.id === asked.id)?.why ?? "" };
+  context.storage.set(LAST_SET_FOLDER, set.folder);
+  return { kept: asked.id, validation };
+}
+
 const raceDescription =
   "Draft a race for the user to start: several conversations at once, e.g. four of a small model, or one on each of several profiles to compare them, each in a git worktree and branch of its own, working on the same task and sharing a board where they post what they learn. This puts the race's form on the canvas, filled in with what you pass; nothing runs until the user checks it and presses Start race, so leave out profiles you aren't sure they want. When all racers have finished you hear their results as your next message; the user picks the work to take on the race page, or hands the pick to you. With decide: vote, the racers rank each other's work first. Racers branch from the last commit, so commit what they need first; the workspace's worktree setup command, such as installing dependencies, runs in each racer's folder before it starts. Advise how to check the work: write tests the racers shouldn't see into a folder outside the repository and pass it as checkFiles, name a judge for what tests can't tell, and say why in advice; the user chooses on the form.";
 
@@ -792,7 +896,9 @@ const host: CanvasHost<Race | BenchRun> = {
     if (asked.kind === "pick") return pick(id, asked.pick, context.storage);
     if (asked.kind === "picked") return picked(id, asked.pick, context.storage);
     if (asked.kind === "deleteRacers") return deleteRacers(id, context);
-    throw new Error("A race's page starts and stops its race, shows a racer's changes, carries it on after a restart, takes the user's pick and deletes its racers.");
+    if (asked.kind === "keepDefault") return { setFolder: (context.storage.get(LAST_SET_FOLDER) as string | undefined) ?? "" };
+    if (asked.kind === "keep-problem") return keepProblem(id, asked, context);
+    throw new Error("A race's page starts and stops its race, shows a racer's changes, carries it on after a restart, takes the user's pick, deletes its racers and keeps a benchmark problem.");
   },
   async activity(event, context) {
     hearCaptain(event, context.storage);

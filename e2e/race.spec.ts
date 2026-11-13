@@ -273,6 +273,36 @@ test("/race:race with nothing after it shows a form, whose race waits for the us
   await expect(page.locator(".timeline:visible .message.user").last()).toContainText(`Take racer 2's work from race ${raceId}`);
   await expect(view.getByText("You took racer 2's work; the conversation that started the race is on it.")).toBeVisible();
   await expect(view.getByRole("button", { name: "Take this" })).toHaveCount(0);
+
+  await test.step("after the pick, racer 2's work is kept as a benchmark problem in a set made here", async () => {
+    const folder2 = decided.match(/- Racer 2 \(racer\): finished · branch \S+ · folder (\S+) ·/)![1]!;
+    writeFileSync(join(folder2, "trim.ts"), "export const trim = (text: string) => text.trim();\n");
+    writeFileSync(join(folder2, "check-trim.sh"), "test -e trim.ts\n");
+    const setDir = join(host.root, "kept-set");
+    mkdirSync(setDir, { recursive: true });
+    const setGit = (...args: string[]) => execFileSync("git", ["-C", setDir, ...args], { encoding: "utf8" }).trim();
+    setGit("init", "-q", "--initial-branch=main");
+    setGit("config", "user.name", "The Owner");
+    setGit("config", "user.email", "owner@example.test");
+    writeFileSync(join(setDir, "set.json"), JSON.stringify({ name: "Kept", tries: 1, checkTimeoutMinutes: 1 }));
+    setGit("add", "-A");
+    setGit("commit", "-qm", "set");
+
+    await expect(view.getByRole("heading", { name: "Keep as a benchmark problem" })).toBeVisible();
+    await helpers().untilFramePainted(page, raceFrame(page));
+    await view.getByLabel("Set folder").fill(setDir);
+    await view.getByLabel("Problem id").fill("trim");
+    await view.getByLabel("The work that's right").selectOption("2");
+    await view.getByLabel("Check files").fill("check-trim.sh");
+    await view.getByLabel("Check command").fill("sh check-trim.sh");
+    await view.getByRole("button", { name: "Keep it" }).click();
+
+    await expect(view.getByText(/Kept as trim in/)).toBeVisible({ timeout: 60_000 });
+    await expect(view.getByText("Commit the set to keep it.", { exact: false })).toBeVisible();
+    expect(existsSync(join(setDir, "problems", "trim", "problem.json"))).toBe(true);
+    expect(readFileSync(join(setDir, "problems", "trim", "reference", "trim.ts"), "utf8")).toContain("text.trim()");
+    expect(setGit("ls-tree", "-r", "--name-only", "start/trim")).not.toContain("check-trim.sh");
+  });
 });
 
 test("/race:race with a task and a profile starts the race at once, and ticking racers to Combine… asks the captain for the parts the user wants", async ({ page }) => {

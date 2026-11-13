@@ -247,7 +247,7 @@ setInterval(() => {
 }, 1000);
 
 /** What the page holds that the race doesn't: the open patches, the form's answers, the passes it has cheered, and the racers' delete as it is asked and runs. */
-const shown = { diffs: new Map(), form: null, profiles: null, combine: new Set(), how: "", resumeAsked: false, taskOpen: false, cheered: null, deleteAsked: false, deleting: false, deleteProblem: "" };
+const shown = { diffs: new Map(), form: null, profiles: null, combine: new Set(), how: "", resumeAsked: false, taskOpen: false, cheered: null, deleteAsked: false, deleting: false, deleteProblem: "", keep: null };
 
 function diffView(text) {
   const lines = text.split("\n").map((line) => {
@@ -654,13 +654,85 @@ function deleteRacersView(race) {
       el(
         "div",
         { class: "row" },
-        el("span", { text: "This deletes each racer's conversation, worktree and branch. Their changes stay on this page." }),
+        el("span", { text: "This deletes each racer's conversation, worktree and branch. Their changes stay on this page. To keep the race as a benchmark problem, keep it first." }),
         el("button", { class: "primary", text: "Delete them", onclick: sendDeleteRacers }),
         el("button", { text: "Cancel", onclick: () => { shown.deleteAsked = false; draw(lastRace); } }),
       ),
       problem,
     );
   return el("div", {}, el("button", { text: "Delete the racers", onclick: () => { shown.deleteAsked = true; shown.deleteProblem = ""; draw(lastRace); } }), problem);
+}
+
+/** The problem id a race's task suggests: its first line's words, lower case, joined by dashes, at most 40 characters. */
+const slugOf = (task) => (task.split("\n")[0].toLowerCase().match(/[a-z0-9]+/g) ?? []).join("-").slice(0, 40).replace(/-+$/, "");
+
+/** The keep form's answers, from the race the first time, then as the user changes them. */
+function keepFormOf(race, keepable) {
+  if (!shown.keep || shown.keep.raceId !== race.id) {
+    shown.keep = { raceId: race.id, setFolder: "", id: slugOf(race.task), racer: keepable[0].number, checkFiles: "", check: race.check ?? "", keeping: false, problem: "", kept: "" };
+    loadKeepDefault(shown.keep);
+  }
+  if (!keepable.some((racer) => racer.number === shown.keep.racer)) shown.keep.racer = keepable[0].number;
+  return shown.keep;
+}
+
+function loadKeepDefault(form) {
+  window.mirador.send({ kind: "keepDefault" }).then(
+    ({ setFolder }) => {
+      if (!form.setFolder && setFolder) {
+        form.setFolder = setFolder;
+        draw(lastRace);
+      }
+    },
+    (error) => console.error("race: the last set folder could not be read:", error),
+  );
+}
+
+/** Keeping a finished racer's work as a benchmark problem: the set, the id, the work that's right, its hidden check files and check. */
+function keepProblemView(race) {
+  if (!["picking", "deciding"].includes(race.phase)) return null;
+  const keepable = compared(race).map(({ racer }) => racer).filter((racer) => typeof racer.deletedAt !== "number");
+  const heading = el("h2", { text: "Keep as a benchmark problem" });
+  if (keepable.length === 0) return el("section", {}, heading, el("p", { text: "The racers were deleted, so their folders are gone; keep a problem before you delete them." }));
+  const form = keepFormOf(race, keepable);
+  const problem = el("p", { class: "problem", role: "alert", text: form.problem });
+  const options = keepable.map((racer) => el("option", { value: String(racer.number), selected: racer.number === form.racer, text: `Racer ${racer.number}${racer.check ? ` (${racer.check.outcome})` : ""}` }));
+  const keep = el("button", {
+    class: "primary",
+    text: form.keeping ? "Keeping…" : "Keep it",
+    disabled: form.keeping,
+    onclick: async () => {
+      form.keeping = true;
+      form.problem = "";
+      form.kept = "";
+      draw(lastRace);
+      try {
+        const checkFiles = form.checkFiles.split("\n").map((path) => path.trim()).filter(Boolean);
+        const { kept, validation } = await window.mirador.send({ kind: "keep-problem", setFolder: form.setFolder, id: form.id, racer: form.racer, checkFiles, check: form.check });
+        form.kept = `Kept as ${kept} in ${form.setFolder}: ${validation.validation}. Commit the set to keep it.`;
+      } catch (error) {
+        form.problem = error.message;
+      }
+      form.keeping = false;
+      draw(lastRace);
+    },
+  });
+  return el(
+    "section",
+    {},
+    heading,
+    el(
+      "div",
+      { class: "form" },
+      el("label", {}, "Set folder", el("input", { type: "text", "aria-label": "Set folder", placeholder: "The problem set's folder", value: form.setFolder, oninput: (event) => (form.setFolder = event.target.value) })),
+      el("label", {}, "Problem id", el("input", { type: "text", "aria-label": "Problem id", value: form.id, oninput: (event) => (form.id = event.target.value) })),
+      el("label", {}, "The work that's right", el("select", { "aria-label": "The work that's right", onchange: (event) => (form.racer = Number(event.target.value)) }, options)),
+      el("label", {}, "Check files", el("textarea", { "aria-label": "Check files", placeholder: "The paths the check needs hidden, one per line, relative to the racer's folder, e.g. tests/test_parse.py", oninput: (event) => (form.checkFiles = event.target.value) }, form.checkFiles)),
+      el("label", {}, "Check command", el("input", { type: "text", "aria-label": "Check command", value: form.check, oninput: (event) => (form.check = event.target.value) })),
+      el("div", { class: "row" }, keep, problem),
+      form.kept ? el("p", { class: "picked", text: form.kept }) : null,
+    ),
+  );
 }
 
 /** How long the race has run: live while it races, else until its last racer's work and check ended. */
@@ -719,7 +791,7 @@ function raceView(race) {
       : null;
   const results = comparison(race);
   const deleteRacers = deleteRacersView(race);
-  return [header(race), podium(race), results, results ? deleteRacers : null, lanes(race, problem), results ? null : deleteRacers, el("div", { class: "row" }, stop, problem), board(race), vote(race), judge(race)];
+  return [header(race), podium(race), results, results ? deleteRacers : null, keepProblemView(race), lanes(race, problem), results ? null : deleteRacers, el("div", { class: "row" }, stop, problem), board(race), vote(race), judge(race)];
 }
 
 /** The form's answers, from the race's draft the first time, then as the user changes them. */

@@ -4,6 +4,9 @@ import { basename, join, resolve } from "node:path";
 import { problemSpecOf, settingsOf, type BenchSettings, type ProblemSpec } from "./bench.ts";
 import { runCheck, type RunningCheck } from "./check.ts";
 
+/** A problem id a race can be kept under: lower-case letters, digits and dashes, at most 40, starting with a letter or digit. */
+export const isProblemId = (id: string) => /^[a-z0-9][a-z0-9-]{0,39}$/.test(id);
+
 export interface Problem extends ProblemSpec {
   task: string;
   folder: string;
