@@ -27,6 +27,20 @@ Racers branch from the workspace's last commit, so work the main checkout hasn't
 
 Needs Mirador's plugin API 15, which lets a plugin's page start conversations, open them and list the profiles with the model and effort each sets. The workspace must be in a git repository with a commit.
 
+## Benchmarks
+
+Race also runs benchmarks: every problem of a set on each profile you choose, each racer alone in a worktree of its own, so a score measures one model. A problem set is the top folder of a git repository, opened as a Mirador workspace. Its `set.json` names the set and sets the check's time limit, the racers' time limit and the tries. Under `problems/<id>/`, each problem has `problem.json` (its check command, start commit and tags), `task.md` (the racer's task, word for word), `check/` (the hidden check files, copied over the racer's own at check time) and `reference/` (a known solution). Each problem starts from its own commit of the set's repository, so every racer begins from the same untouched tree; a problem is valid only when its check fails on that starting tree and passes with the reference solution.
+
+Run one with `/race:bench` in a conversation whose workspace is the set, or ask the agent to run a benchmark: its call fills in the run's form for you to check and start. You choose the columns, a profile each with a model and effort if you like, and every problem runs on each column, a few racers of one profile at a time.
+
+The run page lays the problems out against the columns: each cell shows its racer's result and time, opens its conversation and shows its changes, and each column totals the problems it solved, its median time and its tokens and cost.
+
+A racer whose check fails gets one more turn with what the check printed — the tests are right, fix the code — unless the set allows only one try; results show passes on try 1 and on try 2. A racer that works past the set's time limit is stopped and its cell timed out, and each check runs under the set's check time limit. A run carries on when its page loads after a Mirador restart.
+
+Each ended run leaves its results in the set's `runs/` folder, as `<date>-<run id>.json`: every cell's result, tries, time, tokens and cost, with the totals. The conversation that started the run hears a one-line summary when it is over.
+
+Import the Aider Polyglot benchmark (225 Exercism problems in six languages) with `bun scripts/import-polyglot.ts <polyglot checkout> <set folder>`, where the checkout is a clone of exercism/polyglot; `--languages python,go` and `--limit <n per language>` import a part of it.
+
 ## Develop
 
 ```bash

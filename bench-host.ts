@@ -1,10 +1,12 @@
 import { existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { CanvasActionContext, CanvasPluginContext, CanvasPluginStorage, CanvasTool, ConversationReply, PluginActivityEvent, PluginItem, PluginItemType, PluginProfile, StartedConversation, ToolCaller } from "./mirador/api.ts";
-import { cellsOf, cellsToStart, columnLabel, MAX_ATTEMPTS, MAX_AT_ONCE, newRunId, resultOf, retryPrompt, runSummary, type BenchColumn, type BenchRun, type CellResult } from "./bench.ts";
-import { checks } from "./check.ts";
-import { copyCheckFiles, loadSet, type LoadedSet } from "./sets.ts";
+import { cellsOf, cellsToStart, columnLabel, MAX_ATTEMPTS, MAX_AT_ONCE, newRunId, resultOf, resultsFileOf, retryPrompt, runSummary, type BenchCell, type BenchColumn, type BenchRun, type CellResult } from "./bench.ts";
+import { checks, endLeftover, type StartedCheck } from "./check.ts";
+import { copyCheckFiles, loadSet, type LoadedSet, type Problem } from "./sets.ts";
 import { diffOf } from "./git.ts";
-import { DIFF_LIMIT } from "./race.ts";
+import { DIFF_LIMIT, type CheckResult } from "./race.ts";
 
 export const BENCH_ITEM_TYPE = "bench";
 
@@ -34,6 +36,7 @@ type BenchPageAction =
   | { kind: "set" }
   | ({ kind: "start" } & BenchInput)
   | { kind: "stop" }
+  | { kind: "resume" }
   | { kind: "diff"; cell: number };
 
 /** The captain's latest context: a tool's when the run starts, the page's or replied's once they come; only those two can prompt a retry. */
@@ -41,6 +44,9 @@ type CaptainContext = CanvasPluginContext & Pick<CanvasActionContext, "prompt" |
 
 const runKey = (id: string) => `bench:${id}`;
 const benchRacerKey = (conversationId: string) => `benchRacer:${conversationId}`;
+/** A cell's running check, by its pid and start, which a restart of Mirador in place leaves running. */
+const benchCheckKey = (id: string, cell: number) => `bench-check:${id}:${cell}`;
+const timeLimitKey = (id: string, cell: number) => `${id}:${cell}`;
 const RUNS = "benchRuns";
 
 const runCaptains = new Map<string, CaptainContext>();
@@ -49,6 +55,10 @@ const loadedSets = new Map<string, LoadedSet>();
 const startingForms = new Set<string>();
 /** The racers whose second try has begun, so the end of their first turn isn't taken for the second's. */
 const retryTurnsBegun = new Set<string>();
+/** The bench checks this run of Mirador runs, by `benchCheckKey`; a cell still checking but not here had its check cut short by a restart. */
+const checksUnderWay = new Set<string>();
+/** The time limits of working and retrying cells, by `timeLimitKey`. */
+const timeLimits = new Map<string, ReturnType<typeof setTimeout>>();
 
 const keptRun = (storage: CanvasPluginStorage, id: string) => storage.get(runKey(id)) as KeptRun | undefined;
 export const benchRacerOf = (storage: CanvasPluginStorage, conversationId: string) => storage.get(benchRacerKey(conversationId)) as KeptBenchRacer | undefined;
@@ -145,10 +155,12 @@ function newRun(asked: BenchInput, set: LoadedSet, profiles: PluginProfile[], id
   };
 }
 
+const countWords = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
+
 function startedWords(run: BenchRun, caller: ToolCaller): string {
   const attempts = run.attempts > 1 ? ` × ${run.attempts} attempts` : "";
   const last = caller === "agent" ? "You hear the results as your next message when it's over; carry on meanwhile, or end your turn." : "The run page shows each result as it comes.";
-  return `Bench run ${run.id} started: ${run.problems.length} problems × ${run.columns.length} columns${attempts} on ${run.set.name}. ${last}`;
+  return `Bench run ${run.id} started: ${countWords(run.problems.length, "problem")} × ${countWords(run.columns.length, "column")}${attempts} on ${run.set.name}. ${last}`;
 }
 
 async function commitOf(folder: string, start: string): Promise<string> {
@@ -156,6 +168,55 @@ async function commitOf(folder: string, start: string): Promise<string> {
   const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
   if (exitCode !== 0) throw new Error(`The set has no commit ${start}.`);
   return stdout.trim();
+}
+
+/** Ends a cell with its result, and the tokens and cost of its conversation where the captain can tell them. */
+function markDone(cell: BenchCell, result: CellResult, note: string | null, captain: CaptainContext | undefined) {
+  cell.state = "done";
+  cell.result = result;
+  cell.endedAt = Date.now();
+  if (note !== null) cell.note = note;
+  if (cell.conversationId && captain) {
+    try {
+      cell.usage = captain.usageOf(cell.conversationId);
+    } catch {}
+  }
+}
+
+function clearTimeLimit(id: string, index: number) {
+  const key = timeLimitKey(id, index);
+  const timer = timeLimits.get(key);
+  if (timer !== undefined) clearTimeout(timer);
+  timeLimits.delete(key);
+}
+
+/** Arms the set's time limit for a cell from when it started; one whose time is already past fires at once. */
+function armTimeLimit(storage: CanvasPluginStorage, id: string, index: number) {
+  const kept = keptRun(storage, id);
+  const cell = kept?.run.cells[index];
+  if (!kept || !cell || cell.startedAt === null) return;
+  const left = cell.startedAt + kept.run.settings.agentTimeLimitMinutes * 60_000 - Date.now();
+  clearTimeLimit(id, index);
+  const key = timeLimitKey(id, index);
+  const timer = setTimeout(() => {
+    timeLimits.delete(key);
+    timeLimitReached(storage, id, index).catch((error) => console.error(`bench run ${id}: cell ${index} could not be timed out:`, error));
+  }, Math.max(0, left));
+  timer.unref();
+  timeLimits.set(key, timer);
+}
+
+/** A racer past the set's time limit: its cell ends as timed out, its conversation stops, and the run goes on. */
+async function timeLimitReached(storage: CanvasPluginStorage, id: string, index: number) {
+  const kept = keptRun(storage, id);
+  const cell = kept?.run.cells[index];
+  if (!kept || !cell || kept.run.phase !== "running" || (cell.state !== "working" && cell.state !== "retrying")) return;
+  const captain = runCaptains.get(kept.captain);
+  const { conversationId } = cell;
+  updateRun(storage, id, (run) => markDone(run.cells[index]!, "timed out", `It ran past the set's time limit of ${run.settings.agentTimeLimitMinutes} minutes.`, captain));
+  if (captain && conversationId) await captain.stopConversation(conversationId).catch(() => {});
+  await finishIfDone(storage, id);
+  await advance(storage, id);
 }
 
 /** Starts the cells `cellsToStart` gives, each racer alone in a worktree from its problem's start. */
@@ -197,6 +258,7 @@ async function advance(storage: CanvasPluginStorage, id: string) {
           begun.startedAt = Date.now();
           begun.state = "working";
         });
+        armTimeLimit(storage, id, index);
         storage.set(benchRacerKey(started.id), { run: id, cell: index } satisfies KeptBenchRacer);
       } catch (error) {
         await cellDone(storage, id, index, "couldn't start", error instanceof Error ? error.message : String(error));
@@ -206,15 +268,33 @@ async function advance(storage: CanvasPluginStorage, id: string) {
 }
 
 async function cellDone(storage: CanvasPluginStorage, id: string, index: number, result: CellResult, note: string | null = null) {
-  updateRun(storage, id, (run) => {
-    const cell = run.cells[index]!;
-    cell.state = "done";
-    cell.result = result;
-    cell.endedAt = Date.now();
-    if (note !== null) cell.note = note;
-  });
+  clearTimeLimit(id, index);
+  const kept = keptRun(storage, id);
+  const captain = kept ? runCaptains.get(kept.captain) : undefined;
+  updateRun(storage, id, (run) => markDone(run.cells[index]!, result, note, captain));
   await finishIfDone(storage, id);
   await advance(storage, id);
+}
+
+/**
+ * Runs the problem's check in the racer's folder, ending first what's left of a run of it a restart of Mirador cut short.
+ * Null when the check couldn't run at all, such as with the set's check files gone: the cell then ends as failed.
+ */
+async function runBenchCheck(storage: CanvasPluginStorage, id: string, index: number, { problem, folder, timeoutMs }: { problem: Problem; folder: string; timeoutMs: number }): Promise<CheckResult | null> {
+  const key = benchCheckKey(id, index);
+  checksUnderWay.add(key);
+  try {
+    const leftover = storage.get(key) as StartedCheck | undefined;
+    if (leftover) await endLeftover(leftover);
+    await copyCheckFiles(problem, folder);
+    return await checks.check(id, problem.check, folder, (started) => storage.set(key, started), { timeoutMs });
+  } catch (error) {
+    await cellDone(storage, id, index, "failed", `Race couldn't run the check: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  } finally {
+    checksUnderWay.delete(key);
+    storage.set(key, undefined);
+  }
 }
 
 /** Checks the cell's work with its problem's hidden files, and gives a failed racer its second try with what the check printed. */
@@ -225,8 +305,8 @@ async function checkCell(storage: CanvasPluginStorage, id: string, index: number
   updateRun(storage, id, (run) => (run.cells[index]!.state = "checking"));
   const set = await setOf(kept.run);
   const problem = set.problems.find(({ id: problemId }) => problemId === cell.problem)!;
-  await copyCheckFiles(problem, cell.folder!);
-  const check = await checks.check(id, problem.check, cell.folder!, undefined, { timeoutMs: kept.run.settings.checkTimeoutMinutes * 60_000 });
+  const check = await runBenchCheck(storage, id, index, { problem, folder: cell.folder!, timeoutMs: kept.run.settings.checkTimeoutMinutes * 60_000 });
+  if (check === null) return;
   updateRun(storage, id, (run) => run.cells[index]!.tries.push({ check, endedAt: Date.now() }));
   const run = keptRun(storage, id)!.run;
   const result = resultOf(run.cells[index]!.tries, run.settings.tries);
@@ -272,6 +352,42 @@ export async function benchActivity(event: PluginActivityEvent, storage: CanvasP
   else await cellDone(storage, racer.run, racer.cell, event.ended === "failed" ? "agent failed" : "stopped");
 }
 
+/** A run Mirador restarted during goes on once its page shows: cut-short checks run again, and cells left mid-retry or mid-start end with what happened. */
+async function resumeRun(storage: CanvasPluginStorage, id: string) {
+  const kept = keptRun(storage, id);
+  if (!kept || kept.run.phase !== "running") return;
+  const left = kept.run.cells.map((cell, index) => ({ cell, index }));
+  const cutShort = left.filter(({ cell, index }) => cell.state === "checking" && !checksUnderWay.has(benchCheckKey(id, index)));
+  const midRetry = left.filter(({ cell }) => cell.state === "retrying");
+  const midStart = left.filter(({ cell }) => cell.state === "starting");
+  await Promise.all(cutShort.map(({ index }) => checkCell(storage, id, index)));
+  for (const { index } of midRetry) await cellDone(storage, id, index, "failed", "Mirador restarted during its second try.");
+  for (const { index } of midStart) await cellDone(storage, id, index, "couldn't start", "Mirador restarted as it started.");
+  keptRun(storage, id)?.run.cells.forEach((cell, index) => {
+    if (cell.state === "working" || cell.state === "retrying") armTimeLimit(storage, id, index);
+  });
+  await finishIfDone(storage, id);
+  await advance(storage, id);
+}
+
+/** The run's results file in the set's runs/ folder, dated with the day the run started, in local time. */
+const resultsFileName = (run: BenchRun) => {
+  const started = new Date(run.startedAt!);
+  const day = `${started.getFullYear()}-${String(started.getMonth() + 1).padStart(2, "0")}-${String(started.getDate()).padStart(2, "0")}`;
+  return `${day}-${run.id}.json`;
+};
+
+/** Leaves the run's results with the set; a failure is logged and the run ends regardless. */
+async function leaveResults(run: BenchRun, fileName: string) {
+  const folder = join(run.set.folder, "runs");
+  try {
+    await mkdir(folder, { recursive: true });
+    await writeFile(join(folder, fileName), `${JSON.stringify(resultsFileOf(run), null, 2)}\n`);
+  } catch (error) {
+    console.error(`bench run ${run.id}: its results could not be written to ${folder}:`, error);
+  }
+}
+
 async function finishIfDone(storage: CanvasPluginStorage, id: string) {
   const kept = keptRun(storage, id);
   if (!kept || kept.run.phase !== "running" || kept.run.cells.some(({ result }) => result === null)) return;
@@ -279,31 +395,33 @@ async function finishIfDone(storage: CanvasPluginStorage, id: string) {
     run.phase = "done";
     run.endedAt = Date.now();
   });
+  const run = keptRun(storage, id)!.run;
+  const fileName = resultsFileName(run);
+  await leaveResults(run, fileName);
   const captain = runCaptains.get(kept.captain);
   if (!captain) {
     console.error(`bench run ${id} is over, but Mirador was restarted since it started and can't tell the conversation that started it.`);
     return;
   }
-  const run = keptRun(storage, id)!.run;
-  await captain.prompt(`${runSummary(run)} Tell the user in one line that bench run ${id} is over; its page has every result.`, { afterTurn: true });
+  await captain.prompt(`${runSummary(run)} The results are also in runs/${fileName}. Tell the user in one line that bench run ${id} is over; its page has every result.`, { afterTurn: true });
 }
 
 async function stopRun(id: string, context: CaptainContext) {
   const kept = keptRun(context.storage, id);
   if (!kept) throw new Error("This run is no longer kept.");
+  if (kept.run.phase !== "running") return { stopped: true };
   const working = kept.run.cells.filter(({ state, result }) => result === null && (state === "starting" || state === "working" || state === "retrying"));
-  updateRun(context.storage, id, (run) => {
+  const ended = updateRun(context.storage, id, (run) => {
     run.phase = "stopped";
     run.endedAt = Date.now();
     run.cells.forEach((cell) => {
-      if (cell.result !== null) return;
-      cell.state = "done";
-      cell.result = "stopped";
-      cell.endedAt = Date.now();
+      if (cell.result === null) markDone(cell, "stopped", null, context);
     });
   });
+  kept.run.cells.forEach((_, index) => clearTimeLimit(id, index));
   checks.stopRace(id);
   await Promise.all(working.flatMap(({ conversationId }) => (conversationId ? [context.stopConversation(conversationId).catch(() => {})] : [])));
+  if (ended) await leaveResults(ended.run, resultsFileName(ended.run));
   return { stopped: true };
 }
 
@@ -347,6 +465,10 @@ export async function benchAction(item: PluginItem<BenchRun>, action: unknown, c
   }
   if (asked.kind === "start") return startFromForm(item, asked, context);
   if (asked.kind === "stop") return stopRun(item.data.id, context);
+  if (asked.kind === "resume") {
+    resumeRun(context.storage, item.data.id).catch((error) => console.error(`bench run ${item.data.id} could not go on after a restart:`, error));
+    return { resuming: true };
+  }
   if (asked.kind === "diff") return { diff: await cellWork(context.storage, item.data.id, asked.cell) };
   throw new Error("A run's page starts and stops its run and shows a racer's changes.");
 }

@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import host from "../host.ts";
 import { BENCH_ITEM_TYPE } from "../bench-host.ts";
-import { retryPrompt, runSummary, type BenchRun } from "../bench.ts";
+import { resultsFileOf, retryPrompt, runSummary, type BenchRun } from "../bench.ts";
 import { fakeMirador, finished, git, PROFILES, until } from "./fake-mirador.ts";
 
 let scratch: string;
@@ -50,6 +50,25 @@ type Mirador = ReturnType<typeof miradorOf>;
 /** The 1-based racer number of a cell's conversation, as the fake's replied and heard take it; cells start in parallel, so started order isn't cell order. */
 const cellRacer = (mirador: Mirador, cell: number) => mirador.started.findIndex(({ id }) => id === mirador.page().cells[cell]!.conversationId) + 1;
 const cellStart = (mirador: Mirador, cell: number) => mirador.started[cellRacer(mirador, cell) - 1]!;
+
+const resultsName = (run: BenchRun) => {
+  const started = new Date(run.startedAt!);
+  return `${started.getFullYear()}-${String(started.getMonth() + 1).padStart(2, "0")}-${String(started.getDate()).padStart(2, "0")}-${run.id}.json`;
+};
+
+const isAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const leftoverCheck = () => {
+  const child = Bun.spawn(["sleep", "30"], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  return { pid: child.pid, startedAt: Date.now() };
+};
 
 test("a bench run starts a racer per problem and column, each in a worktree from its problem's start, with its task word for word, at most atOnce per profile at a time", async () => {
   await makeSet(repo, ["two-fer", "bob"]);
@@ -115,7 +134,7 @@ test("a run of several attempts says so in the answer it gives, and runs them on
   await until(() => mirador.started.length === 1, "the first attempt started");
 
   const run = mirador.page();
-  expect(answer).toBe(`Bench run ${run.id} started: 1 problems × 1 columns × 2 attempts on Tiny. The run page shows each result as it comes.`);
+  expect(answer).toBe(`Bench run ${run.id} started: 1 problem × 1 column × 2 attempts on Tiny. The run page shows each result as it comes.`);
   expect(run.attempts).toBe(2);
   expect(run.cells.map(({ attempt, state }) => ({ attempt, state }))).toEqual([
     { attempt: 1, state: "working" },
@@ -239,7 +258,7 @@ test("when every cell has a result the run is over, and the captain hears the su
   expect(run.cells[1]!.ranOn).toBeNull();
   const [told] = mirador.promptsTo(mirador.captain.conversationId);
   expect(told?.afterTurn).toBe(true);
-  expect(told?.text).toBe(`${runSummary(run)} Tell the user in one line that bench run ${run.id} is over; its page has every result.`);
+  expect(told?.text).toBe(`${runSummary(run)} The results are also in runs/${resultsName(run)}. Tell the user in one line that bench run ${run.id} is over; its page has every result.`);
   expect(host.items[BENCH_ITEM_TYPE]!.outcome!(run)).toBe("done");
 });
 
@@ -369,4 +388,115 @@ test("a run's page shows a racer's changes since its problem's start", async () 
   await mirador.replied(1, finished("done"));
   await until(() => mirador.started.length === 2, "the next racer started");
   expect(await mirador.act({ kind: "diff", cell: 1 })).toEqual({ diff: "This racer hasn't changed anything yet." });
+});
+
+test("a racer past the set's time limit is stopped, and its cell timed out", async () => {
+  await makeSet(repo, ["answer"], { agentTimeLimitMinutes: 0.001 });
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  await until(() => mirador.page().cells[0]!.result === "timed out", "the cell timed out");
+
+  expect(mirador.page().cells[0]).toMatchObject({ state: "done", result: "timed out", note: "It ran past the set's time limit of 0.001 minutes." });
+  expect(mirador.stopped).toEqual([mirador.started[0]!.id]);
+  expect(mirador.page().phase).toBe("done");
+
+  await mirador.replied(1, { text: null, ended: "stopped" });
+  expect(mirador.page().cells[0]!.result, "the stopped reply doesn't change the result").toBe("timed out");
+});
+
+test("a finished cell records its conversation's tokens and cost", async () => {
+  await makeSet(repo, ["answer"]);
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  await until(() => mirador.started.length === 1, "the racer started");
+  writeFileSync(join(mirador.started[0]!.folder, "answer.txt"), "42\n");
+
+  await mirador.replied(1, finished("done"));
+
+  expect(mirador.page().cells[0]!.usage).toEqual({ inputTokens: 100, outputTokens: 50, cachedReadTokens: 10, cachedWriteTokens: 5, cost: { amount: 0.25, currency: "USD" }, turns: 1 });
+});
+
+test("a run Mirador restarted during carries on once its page shows", async () => {
+  await makeSet(repo, ["a", "b", "c", "d", "e"]);
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }], atOnce: 3 });
+  await until(() => mirador.started.length === 3, "the first cells started");
+  const id = mirador.page().id;
+  const kept = mirador.captain.storage.get(`bench:${id}`) as { run: BenchRun };
+  writeFileSync(join(kept.run.cells[0]!.folder!, "answer.txt"), "42\n");
+  kept.run.cells[0]!.state = "checking";
+  kept.run.cells[1]!.state = "retrying";
+  kept.run.cells[3]!.state = "starting";
+  mirador.captain.storage.set(`bench:${id}`, kept);
+  const leftover = leftoverCheck();
+  mirador.captain.storage.set(`bench-check:${id}:0`, leftover);
+
+  expect(await mirador.act({ kind: "resume" })).toEqual({ resuming: true });
+  await mirador.act({ kind: "resume" });
+  await until(() => [0, 1, 3].every((cell) => mirador.page().cells[cell]!.result !== null) && mirador.page().cells[4]!.state === "working", "the cut-short cell checked, the interrupted cells ended and the waiting cell started");
+
+  expect(isAlive(leftover.pid), "what was left of the old check").toBe(false);
+  const run = mirador.page();
+  expect(run.cells[0]).toMatchObject({ state: "done", result: "passed" });
+  expect(run.cells[0]!.tries, "the cut-short check ran once").toHaveLength(1);
+  expect(run.cells[1]).toMatchObject({ state: "done", result: "failed", note: "Mirador restarted during its second try." });
+  expect(run.cells[2]!.state, "the working cell keeps working").toBe("working");
+  expect(run.cells[3]).toMatchObject({ state: "done", result: "couldn't start", note: "Mirador restarted as it started." });
+  expect(mirador.captain.storage.get(`bench-check:${id}:0`)).toBeUndefined();
+});
+
+test("an ended run leaves its results in the set's runs folder, once", async () => {
+  await makeSet(repo, ["answer"]);
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  await until(() => mirador.started.length === 1, "the racer started");
+  writeFileSync(join(mirador.started[0]!.folder, "answer.txt"), "42\n");
+  await mirador.replied(1, finished("done"));
+
+  const run = mirador.page();
+  expect(run.phase).toBe("done");
+  const runs = join(repo, "runs");
+  const name = resultsName(run);
+  expect(readdirSync(runs)).toEqual([name]);
+  expect(readFileSync(join(runs, name), "utf8")).toBe(`${JSON.stringify(resultsFileOf(run), null, 2)}\n`);
+
+  const stopped = miradorOf();
+  await stopped.call(stopped.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  await until(() => stopped.started.length === 1, "the racer started");
+  expect(await stopped.act({ kind: "stop" })).toEqual({ stopped: true });
+
+  const ended = stopped.page();
+  expect(ended.phase).toBe("stopped");
+  const stoppedName = resultsName(ended);
+  expect(readdirSync(runs).sort()).toEqual([name, stoppedName].sort());
+  expect(readFileSync(join(runs, stoppedName), "utf8")).toBe(`${JSON.stringify(resultsFileOf(ended), null, 2)}\n`);
+  expect(await stopped.act({ kind: "stop" })).toEqual({ stopped: true });
+  expect(readdirSync(runs), "a second Stop doesn't write again").toHaveLength(2);
+});
+
+test("a check that can't run fails its cell, saying why, and the run goes on", async () => {
+  await makeSet(repo, ["a", "b"]);
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }], atOnce: 1 });
+  await until(() => mirador.started.length === 1, "the first racer started");
+  await rm(join(repo, "problems", "a", "check"), { recursive: true });
+  writeFileSync(join(mirador.started[0]!.folder, "answer.txt"), "42\n");
+
+  await mirador.replied(1, finished("done"));
+  await until(() => mirador.started.length === 2, "the next problem's racer started");
+
+  expect(mirador.page().cells[0]).toMatchObject({ state: "done", result: "failed", note: expect.stringContaining("Race couldn't run the check: ") });
+  writeFileSync(join(mirador.started[1]!.folder, "answer.txt"), "42\n");
+  await mirador.replied(2, finished("done"));
+  expect(mirador.page().cells[1]!.result).toBe("passed");
+  expect(mirador.page().phase).toBe("done");
+});
+
+test("a run of one problem on one column says so in the singular", async () => {
+  await makeSet(repo, ["answer"]);
+  const mirador = miradorOf();
+
+  const answer = await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+
+  expect(answer).toBe(`Bench run ${mirador.page().id} started: 1 problem × 1 column on Tiny. The run page shows each result as it comes.`);
 });
