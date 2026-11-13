@@ -1,6 +1,6 @@
 # Race
 
-A [Mirador](https://github.com/sodre90/mirador) plugin that races a task on several agents at once, on one profile, such as four of a small local model, or on one of several profiles each, to compare them, and has them work as a team: each works in a git worktree and branch of its own, and they share a board where they post what they learn. Only you start a race: an agent's call fills in the race's form for you to check and start. When all have finished, you take the best work, or combine the best parts, from the race page, or let the conversation that started the race pick and merge it.
+A [Mirador](https://github.com/sodre90/mirador) plugin that races a task on several agents at once, on one profile, such as four of a small local model, or on one of several profiles each, to compare them, and has them work as a team: each works in a git worktree and branch of its own, and they share a board where they post what they learn. Only you start a race: an agent's call fills in the race's form for you to check and start. When all have finished, you take the best work, or combine the best parts, from the race page, or let the conversation that started the race pick and merge it. Race also runs [benchmarks](#benchmarks): every problem of a set on each model you choose, with a leaderboard of the models that ran on it.
 
 ![Four racers at work under the conversation that started the race, each in a lane on the race page](screenshots/racers-beside-captain.png)
 
