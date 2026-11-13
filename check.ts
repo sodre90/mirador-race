@@ -136,20 +136,20 @@ export class CheckQueue {
 
   constructor(
     private readonly atOnce: number,
-    private readonly start: (command: string, folder: string) => RunningCheck = runCheck,
+    private readonly start: (command: string, folder: string, options: { timeoutMs?: number }) => RunningCheck = runCheck,
   ) {}
 
   /**
    * Resolves to what the check said; one whose race stops before it starts resolves as stopped at once. `started` hears
    * its pid and when it started, as it starts.
    */
-  check(race: string, command: string, folder: string, started: (check: StartedCheck) => void = () => {}): Promise<CheckResult> {
+  check(race: string, command: string, folder: string, started: (check: StartedCheck) => void = () => {}, { timeoutMs }: { timeoutMs?: number } = {}): Promise<CheckResult> {
     return new Promise((resolve) => {
       const drop = () => resolve({ outcome: "stopped", exitCode: null, durationMs: 0, output: "" });
       if (this.stoppedRaces.has(race)) return drop();
       const run = () => {
         this.running++;
-        const check = this.startOrFail(command, folder);
+        const check = this.startOrFail(command, folder, { timeoutMs });
         if (check.pid !== null) started({ pid: check.pid, startedAt: Date.now() });
         const ofRace = this.started.get(race) ?? new Set();
         this.started.set(race, ofRace.add(check));
@@ -172,9 +172,9 @@ export class CheckQueue {
     this.started.get(race)?.forEach((check) => check.stop());
   }
 
-  private startOrFail(command: string, folder: string) {
+  private startOrFail(command: string, folder: string, options: { timeoutMs?: number }) {
     try {
-      return this.start(command, folder);
+      return this.start(command, folder, options);
     } catch (error) {
       return failedToStart(error);
     }
@@ -184,3 +184,6 @@ export class CheckQueue {
     while (this.running < this.atOnce && this.waiting.length > 0) this.waiting.shift()!.run();
   }
 }
+
+/** Two checks at once: more would slow each other down, as several test suites on one machine do. Races and bench runs share it. */
+export const checks = new CheckQueue(2);

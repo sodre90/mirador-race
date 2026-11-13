@@ -4,20 +4,15 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import host, { ITEM_TYPE } from "../host.ts";
-import type { CanvasActionContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivity, PluginItem } from "../mirador/api.ts";
 import { runCheck, CheckQueue, endLeftover, type RunningCheck } from "../check.ts";
 import { copyCheckFilesOver } from "../check-files.ts";
 import { raceRequest, tally, type CheckResult, type Race } from "../race.ts";
+import { fakeMirador as fakeMiradorIn, finished, git, PROFILES, until } from "./fake-mirador.ts";
 
 let scratch: string;
 let repo: string;
 
-async function git(folder: string, args: string[]) {
-  const child = Bun.spawn(["git", "-C", folder, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-  if (exitCode !== 0) throw new Error(`git ${args.join(" ")} failed`);
-  return stdout;
-}
+const fakeMirador = (options: { refuseRacer?: number; caller?: "agent" | "user" } = {}) => fakeMiradorIn({ ...options, repo, scratch });
 
 beforeEach(async () => {
   scratch = await realpath(await mkdtemp(join(tmpdir(), "race-test-")));
@@ -29,89 +24,6 @@ beforeEach(async () => {
   await git(repo, ["commit", "-qm", "base"]);
 });
 afterEach(() => rm(scratch, { recursive: true, force: true }));
-
-type Context = CanvasToolContext<Race> & CanvasActionContext<Race>;
-
-const PROFILES = [
-  { name: "Qwen Flash", agent: "opencode", model: null, effort: null },
-  { name: "Kimi", agent: "claude", model: { id: "opus", name: "Kimi K3" }, effort: "high" },
-];
-
-/** Mirador as the plugin sees it: one storage, the items of each conversation, and conversations started in real worktrees of the repo. */
-function fakeMirador({ refuseRacer, caller = "user" }: { refuseRacer?: number; caller?: "agent" | "user" } = {}) {
-  const kept = new Map<string, string>();
-  const storage: CanvasPluginStorage = {
-    get: (key) => (kept.has(key) ? JSON.parse(kept.get(key)!) : undefined),
-    set: (key, value) => (value === undefined ? kept.delete(key) : kept.set(key, JSON.stringify(value))),
-  };
-  const items: (PluginItem<Race> & { conversationId: string })[] = [];
-  const prompts: { conversationId: string; text: string; afterTurn: boolean }[] = [];
-  const stopped: string[] = [];
-  const started: { id: string; profile: string; prompt: string; title?: string; folder: string; branch: string }[] = [];
-  const beside: { id: string; profile: string; prompt: string; title?: string }[] = [];
-  const contextOf = (conversationId: string): Context => ({
-    conversationId,
-    caller,
-    workspace: { id: "workspace", name: "repo", folder: repo },
-    storage,
-    profiles: () => PROFILES,
-    usageOf: () => ({ inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, cachedWriteTokens: 0, cost: null, turns: 0 }),
-    items: () => items.filter((item) => item.conversationId === conversationId),
-    change(itemId, { title, data }) {
-      const item = items.find((each) => each.id === itemId && each.conversationId === conversationId);
-      if (!item) throw new Error(`No item ${itemId} in ${conversationId}.`);
-      if (title) item.title = title;
-      if (data) item.data = structuredClone(data);
-      return item;
-    },
-    profileSetting: () => null,
-    publish({ type, title, data }) {
-      const item = { id: `item-${items.length + 1}`, type, title, data: structuredClone(data), createdAt: Date.now(), dismissed: false, agentEditedAt: null, conversationId };
-      items.push(item);
-      return item;
-    },
-    async prompt(text, { afterTurn = false } = {}) {
-      prompts.push({ conversationId, text, afterTurn });
-    },
-    async startConversation({ profile: asked, prompt, title, worktree }) {
-      const profile = PROFILES.find(({ name }) => name.toLowerCase() === asked.toLowerCase())?.name;
-      if (!profile) throw new Error(`There is no profile named ${asked}.`);
-      if (refuseRacer === started.length + beside.length + 1) throw new Error("A conversation gets its own worktree only in a git repository with a commit.");
-      const id = crypto.randomUUID();
-      if (!worktree) {
-        beside.push({ id, profile, prompt, title });
-        return { id, profile };
-      }
-      const short = id.slice(0, 8);
-      const folder = join(scratch, "worktrees", short);
-      const branch = `mirador/${short}`;
-      await git(repo, ["worktree", "add", "-q", "-b", branch, folder, "HEAD"]);
-      started.push({ id, profile, prompt, ...(title && { title }), folder, branch });
-      return { id, profile, worktree: { folder, branch } };
-    },
-    async stopConversation(id) {
-      stopped.push(id);
-    },
-    async promptStarted(id, text) {
-      prompts.push({ conversationId: id, text, afterTurn: true });
-    },
-    openInEditor() {},
-  });
-  const captain = contextOf(crypto.randomUUID());
-  const call = async (context: Context, tool: string, input: Record<string, unknown>) => host.tools[tool]!.run(input, context);
-  const page = () => items.find((item) => item.type === ITEM_TYPE && item.conversationId === captain.conversationId)!.data;
-  const racer = (number: number) => contextOf(started[number - 1]!.id);
-  const replied = (number: number, reply: ConversationReply) => host.replied!({ id: started[number - 1]!.id, profile: started[number - 1]!.profile }, reply, captain);
-  const judgeReplied = (reply: ConversationReply) => host.replied!({ id: beside.at(-1)!.id, profile: beside.at(-1)!.profile }, reply, captain);
-  const raceItem = () => items.find((item) => item.type === ITEM_TYPE && item.conversationId === captain.conversationId)!;
-  const act = (action: Record<string, unknown>) => host.action!(raceItem(), action, captain);
-  const heard = (number: number, activity: PluginActivity) =>
-    host.activity!({ ...activity, conversationId: started[number - 1]!.id, conversationTitle: "", at: Date.now() } as never, { storage, windowChanged() {}, profileSetting: () => null, profiles: () => PROFILES, settingOfProfile: () => null });
-  const promptsTo = (conversationId: string) => prompts.filter((prompt) => prompt.conversationId === conversationId);
-  return { captain, contextOf, call, page, racer, replied, judgeReplied, heard, prompts, promptsTo, stopped, started, beside, items, raceItem, act };
-}
-
-const finished = (text: string): ConversationReply => ({ text, ended: "finished" });
 
 test("a race starts its racers on one profile, each in a worktree of its own with its number, and shows them on a page", async () => {
   const mirador = fakeMirador();
@@ -360,11 +272,6 @@ test("the tally gives a voter's first pick a point for each racer it ranked belo
     { racer: 1, points: 0, firsts: [] },
   ]);
 });
-
-const until = async (condition: () => boolean, what: string) => {
-  for (let tries = 0; tries < 400 && !condition(); tries++) await Bun.sleep(10);
-  if (!condition()) throw new Error(`Never came: ${what}`);
-};
 
 test("racers can run on a profile each, which repeat in turn when there are more racers", async () => {
   const mirador = fakeMirador();
@@ -942,4 +849,17 @@ test("the captain hears that the check ran with the hidden check files", async (
 
   const [told] = mirador.promptsTo(mirador.captain.conversationId);
   expect(told?.text).toMatch(/check passed in [\d.]+ s, with the hidden check files/);
+});
+
+test("a check queue passes a check's own time limit on", async () => {
+  const options: { timeoutMs?: number }[] = [];
+  const queue = new CheckQueue(1, (_command, _folder, given): RunningCheck => {
+    options.push(given);
+    return { pid: null, result: Promise.resolve({ outcome: "passed", exitCode: 0, durationMs: 0, output: "" }), stop() {} };
+  });
+
+  await queue.check("a", "true", scratch, undefined, { timeoutMs: 1234 });
+  await queue.check("a", "true", scratch);
+
+  expect(options).toStrictEqual([{ timeoutMs: 1234 }, { timeoutMs: undefined }]);
 });

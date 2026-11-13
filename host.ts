@@ -1,8 +1,10 @@
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import type { CanvasActionContext, CanvasHost, CanvasPluginContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivityEvent, PluginProfile, StartedConversation } from "./mirador/api.ts";
-import { CheckQueue, endLeftover, type StartedCheck } from "./check.ts";
+import type { CanvasActionContext, CanvasHost, CanvasPluginContext, CanvasPluginStorage, CanvasToolContext, ConversationReply, PluginActivityEvent, PluginItem, PluginProfile, StartedConversation } from "./mirador/api.ts";
+import { checks, endLeftover, type StartedCheck } from "./check.ts";
 import { copyCheckFilesOver, putBackOwnFiles, type KeptOwnFiles } from "./check-files.ts";
+import { BENCH_ITEM_TYPE, benchAction, benchActivity, benchItem, benchRacerEnded, benchRacerOf, benchTool } from "./bench-host.ts";
+import type { BenchRun } from "./bench.ts";
 import { changesOf, diffOf, raceBase } from "./git.ts";
 import {
   DIFF_LIMIT,
@@ -47,9 +49,6 @@ export const JUDGE = -1;
 /** A changed file shows on the race page within this long of a racer's tool call. */
 const CHANGES_REFRESH_MS = 5_000;
 
-/** Two checks at once: more would slow each other down, as several test suites on one machine do. */
-const CHECKS_AT_ONCE = 2;
-
 /** What the plugin keeps of a race across restarts: the race, and the conversation and item it shows in. */
 interface KeptRace {
   race: Race;
@@ -89,7 +88,7 @@ type PageAction =
   | { kind: "picked"; pick: RacePick };
 
 /** What starting a race takes of the conversation it starts from, a tool's call or the user's press on the form. */
-type StartsRacers = CanvasPluginContext<Race> & Pick<CanvasActionContext<Race>, "startConversation" | "stopConversation" | "prompt">;
+type StartsRacers = CanvasPluginContext<Race | BenchRun> & Pick<CanvasActionContext<Race | BenchRun>, "startConversation" | "stopConversation" | "prompt">;
 
 const raceKey = (id: string) => `race:${id}`;
 const racerKey = (conversationId: string) => `racer:${conversationId}`;
@@ -103,11 +102,10 @@ const RACES = "races";
 
 /** The conversations' contexts this run of Mirador has seen: the captain's to change its race page, tell it and start its judge, a racer's to ask for its vote. */
 const captains = new Map<string, StartsRacers>();
-const racerContexts = new Map<string, CanvasToolContext<Race>>();
+const racerContexts = new Map<string, CanvasToolContext<Race | BenchRun>>();
 const refreshes = new Map<string, { running: boolean; last: number }>();
 /** The forms whose Start is starting their race, so a second press doesn't start it twice. */
 const startingForms = new Set<string>();
-const checks = new CheckQueue(CHECKS_AT_ONCE);
 /** The racers this run of Mirador checks, by `startedCheckKey`; a racer still checking but not here had its check cut short by a restart. */
 const checksUnderWay = new Set<string>();
 
@@ -243,7 +241,7 @@ async function startRace(race: Race, context: StartsRacers, show: (race: Race) =
   return keptRace(context.storage, race.id)!.race;
 }
 
-async function startFromForm(form: { id: string; data: Race }, asked: RaceInput, context: CanvasActionContext<Race>) {
+async function startFromForm(form: { id: string; data: Race }, asked: RaceInput, context: CanvasActionContext<Race | BenchRun>) {
   if (form.data.phase !== "setup" || startingForms.has(form.data.id)) throw new Error("This race has started already.");
   const request = raceRequest(asked);
   if (typeof request === "string") throw new Error(request);
@@ -421,7 +419,7 @@ async function hearActivity(event: PluginActivityEvent, storage: CanvasPluginSto
   }
 }
 
-async function stopRace(id: string, context: CanvasActionContext<Race>) {
+async function stopRace(id: string, context: CanvasActionContext<Race | BenchRun>) {
   const kept = update(context.storage, id, (race) => {
     if (race.phase === "racing") race.phase = "stopped";
   });
@@ -463,7 +461,7 @@ const DRAFTED =
   "The race's form is on the canvas, filled in with what you asked. Nothing runs until the user checks it and presses Start race: tell them it waits for them. When all racers have finished you hear their results, and the user picks the work to take on the race page.";
 
 /** The race's form on the canvas, filled in with what was asked, for the user to finish and start. */
-function publishForm(asked: RaceInput, context: CanvasToolContext<Race>) {
+function publishForm(asked: RaceInput, context: CanvasToolContext<Race | BenchRun>) {
   const profiles = asked.profiles ?? (asked.profile ? [asked.profile] : undefined);
   context.publish({
     type: ITEM_TYPE,
@@ -490,7 +488,7 @@ async function checkFilesProblem(checkFiles: string | null): Promise<string | nu
 }
 
 /** What's wrong with the agent's draft that the form can't show: a missing task, a profile Mirador doesn't have, or a hidden check files folder that isn't one. */
-async function draftProblem(asked: RaceInput, context: CanvasToolContext<Race>): Promise<string | null> {
+async function draftProblem(asked: RaceInput, context: CanvasToolContext<Race | BenchRun>): Promise<string | null> {
   if (!asked.task?.trim()) return "Say what the racers should do: the task.";
   const known = context.profiles().map(({ name }) => name.toLowerCase());
   const unknown = [...(asked.profiles ?? []), ...(asked.profile ? [asked.profile] : [])].filter((name) => !known.includes(name.trim().toLowerCase()));
@@ -500,12 +498,13 @@ async function draftProblem(asked: RaceInput, context: CanvasToolContext<Race>):
   return checkFilesProblem(asked.checkFiles?.trim() || null);
 }
 
-const host: CanvasHost<Race> = {
+const host: CanvasHost<Race | BenchRun> = {
   items: {
     [ITEM_TYPE]: {
       icon: "⚑",
       placement: "page",
-      outcome: (race) => {
+      outcome: (data) => {
+        const race = data as Race;
         if (race.phase === "setup") return "new";
         if (race.phase === "racing") return `${race.racers.filter((racer) => !isWorking(racer)).length}/${race.racers.length} done`;
         if (race.phase === "voting") return `voting ${race.votes.length}/${race.voters.length}`;
@@ -513,8 +512,10 @@ const host: CanvasHost<Race> = {
         return race.phase;
       },
     },
+    [BENCH_ITEM_TYPE]: benchItem,
   },
   tools: {
+    bench: benchTool,
     race: {
       description: raceDescription,
       command: { description: "Race a task on several agents; with no arguments, a form to fill in" },
@@ -683,6 +684,7 @@ const host: CanvasHost<Race> = {
   },
   async replied(started, reply, context) {
     captains.set(context.conversationId, context);
+    if (benchRacerOf(context.storage, started.id)) return benchRacerEnded(started, reply, context);
     const judged = keptJudge(context.storage, started.id);
     if (judged) {
       const race = keptRace(context.storage, judged.race)?.race;
@@ -700,10 +702,11 @@ const host: CanvasHost<Race> = {
   },
   async action(item, action, context) {
     captains.set(context.conversationId, context);
+    if (item.type === BENCH_ITEM_TYPE) return benchAction(item as PluginItem<BenchRun>, action, context);
     const asked = action as PageAction;
     const id = item.data.id;
     if (asked.kind === "profiles") return context.profiles();
-    if (asked.kind === "start") return startFromForm(item, asked, context);
+    if (asked.kind === "start") return startFromForm(item as PluginItem<Race>, asked, context);
     if (asked.kind === "stop") return stopRace(id, context);
     if (asked.kind === "diff") return { diff: await racerWork(context.storage, id, asked.racer) };
     if (asked.kind === "resume") {
@@ -715,6 +718,7 @@ const host: CanvasHost<Race> = {
     throw new Error("A race's page starts and stops its race, shows a racer's changes, carries it on after a restart and takes the user's pick.");
   },
   async activity(event, context) {
+    if (benchRacerOf(context.storage, event.conversationId)) return benchActivity(event, context.storage);
     await hearActivity(event, context.storage);
   },
   guidance: {
