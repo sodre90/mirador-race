@@ -25,7 +25,7 @@ A [Mirador](https://github.com/sodre90/mirador) plugin that races a task on seve
 
 Racers branch from the workspace's last commit, so work the main checkout hasn't committed isn't in their folders. A new worktree has no installed dependencies either: set the workspace's **Setup command for a new worktree** under *Where conversations work*, such as `bun install`, so each racer's check can run.
 
-Needs Mirador's plugin API 15, which lets a plugin's page start conversations, open them and list the profiles with the model and effort each sets. The workspace must be in a git repository with a commit.
+Needs Mirador's plugin API 16, which lets a plugin's page start conversations, open them, delete the conversations the plugin started with their worktrees, and list the profiles with the model and effort each sets. The workspace must be in a git repository with a commit.
 
 ## Benchmarks
 

@@ -31,6 +31,7 @@ const cellOf = (overrides: Partial<BenchCell> = {}): BenchCell => ({
   conversationId: null,
   folder: null,
   branch: null,
+  patch: null,
   tries: [],
   startedAt: null,
   endedAt: null,
@@ -48,6 +49,7 @@ function runOf(columns: BenchColumn[], cells: BenchCell[], overrides: Partial<Be
     columns,
     attempts: 1,
     atOnce: 1,
+    deleteRacers: false,
     problems: [...new Set(cells.map(({ problem }) => problem))],
     cells,
     phase: "running",
@@ -241,7 +243,7 @@ test("resultsFileOf leaves the run's shape, each column's ranOn from its first c
   const usage = usageOf(100, 50, 0.5);
   const cells = [
     cellOf({ column: 0, attempt: 1 }),
-    cellOf({ column: 1, attempt: 1, state: "done", result: "passed", startedAt: 0, endedAt: 65_000, tries: [tryOf("passed")], usage, ranOn }),
+    cellOf({ column: 1, attempt: 1, state: "done", result: "passed", startedAt: 0, endedAt: 65_000, tries: [tryOf("passed")], usage, ranOn, patch: "the racer's change" }),
     cellOf({ column: 0, attempt: 2, state: "done", result: "failed", startedAt: 0, endedAt: 30_000, tries: [tryOf("failed")], ranOn: local, note: "the check couldn't start" }),
     cellOf({ column: 1, attempt: 2, state: "starting", startedAt: 50_000 }),
   ];
@@ -259,10 +261,10 @@ test("resultsFileOf leaves the run's shape, each column's ranOn from its first c
       { profile: "Kimi", model: "opus", effort: null, ranOn },
     ],
     cells: [
-      { problem: "two-fer", column: 0, attempt: 1, result: null, seconds: null, tries: [], usage: null, note: null },
-      { problem: "two-fer", column: 1, attempt: 1, result: "passed", seconds: 65, tries: [{ outcome: "passed", exitCode: 0, seconds: 1 }], usage, note: null },
-      { problem: "two-fer", column: 0, attempt: 2, result: "failed", seconds: 30, tries: [{ outcome: "failed", exitCode: 1, seconds: 1 }], usage: null, note: "the check couldn't start" },
-      { problem: "two-fer", column: 1, attempt: 2, result: null, seconds: null, tries: [], usage: null, note: null },
+      { problem: "two-fer", column: 0, attempt: 1, result: null, seconds: null, tries: [], usage: null, note: null, patch: null },
+      { problem: "two-fer", column: 1, attempt: 1, result: "passed", seconds: 65, tries: [{ outcome: "passed", exitCode: 0, seconds: 1 }], usage, note: null, patch: "the racer's change" },
+      { problem: "two-fer", column: 0, attempt: 2, result: "failed", seconds: 30, tries: [{ outcome: "failed", exitCode: 1, seconds: 1 }], usage: null, note: "the check couldn't start", patch: null },
+      { problem: "two-fer", column: 1, attempt: 2, result: null, seconds: null, tries: [], usage: null, note: null, patch: null },
     ],
     totals: totalsOf(run),
   });

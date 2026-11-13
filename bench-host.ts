@@ -28,6 +28,7 @@ interface BenchInput {
   tries?: 1 | 2;
   atOnce?: number;
   problems?: string[];
+  deleteRacers?: boolean;
 }
 
 /** What a run's page asks of the plugin. */
@@ -41,7 +42,7 @@ type BenchPageAction =
   | { kind: "diff"; cell: number };
 
 /** The captain's latest context: a tool's when the run starts, the page's or replied's once they come; only those two can prompt a retry. */
-type CaptainContext = CanvasPluginContext & Pick<CanvasActionContext, "prompt" | "startConversation" | "stopConversation"> & Partial<Pick<CanvasActionContext, "promptStarted">>;
+type CaptainContext = CanvasPluginContext & Pick<CanvasActionContext, "prompt" | "startConversation" | "stopConversation" | "deleteStarted"> & Partial<Pick<CanvasActionContext, "promptStarted">>;
 
 const runKey = (id: string) => `bench:${id}`;
 const benchRacerKey = (conversationId: string) => `benchRacer:${conversationId}`;
@@ -128,6 +129,7 @@ function setupRun(asked: BenchInput, set: LoadedSet, columns: BenchColumn[], pro
     columns,
     attempts: asked.attempts ?? 1,
     atOnce: asked.atOnce ?? 2,
+    deleteRacers: asked.deleteRacers ?? false,
     problems,
     cells: [],
     phase: "setup",
@@ -154,6 +156,7 @@ function newRun(asked: BenchInput, set: LoadedSet, profiles: PluginProfile[], id
     columns,
     attempts,
     atOnce,
+    deleteRacers: asked.deleteRacers ?? false,
     problems,
     cells: cellsOf(problems, columns.length, attempts),
     phase: "running",
@@ -188,6 +191,37 @@ function markDone(cell: BenchCell, result: CellResult, note: string | null, capt
       cell.usage = captain.usageOf(cell.conversationId);
     } catch {}
   }
+}
+
+/** Keeps a cell's changes as its patch, then deletes its racer's conversation and worktree, as the user's delete does. */
+async function cleanUpRacer(storage: CanvasPluginStorage, id: string, index: number) {
+  const kept = keptRun(storage, id);
+  const cell = kept?.run.cells[index];
+  if (!kept || !cell || !kept.run.deleteRacers || !cell.conversationId) return;
+  const { conversationId } = cell;
+  let patch: string | null = null;
+  if (cell.folder && existsSync(cell.folder)) {
+    try {
+      const set = await setOf(kept.run);
+      const problem = set.problems.find(({ id: problemId }) => problemId === cell.problem)!;
+      const start = await commitOf(kept.run.set.folder, problem.start);
+      const diff = await diffOf(cell.folder, start);
+      patch = diff.length <= DIFF_LIMIT ? diff : `${diff.slice(0, DIFF_LIMIT)}\n\n[Cut at ${DIFF_LIMIT} characters.]`;
+    } catch {}
+  }
+  storage.set(benchRacerKey(conversationId), undefined);
+  try {
+    await runCaptains.get(kept.captain)?.deleteStarted(conversationId);
+  } catch (error) {
+    console.error(`bench run ${id}: cell ${index}'s conversation could not be deleted:`, error);
+  }
+  updateRun(storage, id, (run) => {
+    const cleaned = run.cells[index]!;
+    cleaned.patch = patch;
+    cleaned.conversationId = null;
+    cleaned.folder = null;
+    cleaned.branch = null;
+  });
 }
 
 function clearTimeLimit(id: string, index: number) {
@@ -276,7 +310,8 @@ async function advance(storage: CanvasPluginStorage, id: string) {
           begun.state = "working";
         });
         if (!startedInTime) {
-          await captain.stopConversation(started.id).catch(() => {});
+          if (current.run.deleteRacers) await cleanUpRacer(storage, id, index);
+          else await captain.stopConversation(started.id).catch(() => {});
           return;
         }
         armTimeLimit(storage, id, index);
@@ -296,6 +331,7 @@ async function cellDone(storage: CanvasPluginStorage, id: string, index: number,
   const kept = keptRun(storage, id);
   const captain = kept ? runCaptains.get(kept.captain) : undefined;
   updateRun(storage, id, (run) => markDone(run.cells[index]!, result, note, captain));
+  await cleanUpRacer(storage, id, index);
   await finishIfDone(storage, id);
   await advance(storage, id);
 }
@@ -436,8 +472,9 @@ async function stopRun(id: string, context: CaptainContext) {
   const kept = keptRun(context.storage, id);
   if (!kept) throw new Error("This run is no longer kept.");
   if (kept.run.phase !== "running") return { stopped: true };
-  const working = kept.run.cells.filter(({ state, result }) => result === null && (state === "starting" || state === "working" || state === "retrying"));
-  const ended = updateRun(context.storage, id, (run) => {
+  const ending = kept.run.cells.map((cell, index) => ({ cell, index })).filter(({ cell }) => cell.result === null);
+  const working = ending.filter(({ cell }) => cell.state === "starting" || cell.state === "working" || cell.state === "retrying");
+  updateRun(context.storage, id, (run) => {
     run.phase = "stopped";
     run.endedAt = Date.now();
     run.cells.forEach((cell) => {
@@ -449,8 +486,10 @@ async function stopRun(id: string, context: CaptainContext) {
     retriesUnderWay.delete(cellKey(id, index));
   });
   checks.stopRace(id);
-  await Promise.all(working.flatMap(({ conversationId }) => (conversationId ? [context.stopConversation(conversationId).catch(() => {})] : [])));
-  if (ended) await leaveResults(ended.run, resultsFileName(ended.run));
+  await Promise.all(working.flatMap(({ cell }) => (cell.conversationId ? [context.stopConversation(cell.conversationId).catch(() => {})] : [])));
+  await Promise.all(ending.map(({ index }) => cleanUpRacer(context.storage, id, index)));
+  const stopped = keptRun(context.storage, id);
+  if (stopped) await leaveResults(stopped.run, resultsFileName(stopped.run));
   return { stopped: true };
 }
 
@@ -497,6 +536,7 @@ async function cellWork(storage: CanvasPluginStorage, id: string, index: number)
   const kept = keptRun(storage, id);
   const cell = kept?.run.cells[index];
   if (!kept || !cell) throw new Error(`Run ${id} has no cell ${index}.`);
+  if (!cell.folder && cell.patch !== null) return cell.patch;
   if (!cell.folder || !existsSync(cell.folder)) return "This racer hasn't started yet; look again in a minute.";
   const set = await setOf(kept.run);
   const problem = set.problems.find(({ id: problemId }) => problemId === cell.problem)!;
@@ -563,6 +603,7 @@ export const benchTool: CanvasTool = {
       tries: { type: "integer", enum: [1, 2], description: "How many tries a racer gets: 2 gives a failed racer one more turn with the check's output; the set's own when left out." },
       atOnce: { type: "integer", minimum: 1, maximum: MAX_AT_ONCE, description: "How many racers of one profile work at once; a local model serves only a few. 2 unless the user asks for another number." },
       problems: { type: "array", items: { type: "string", minLength: 1 }, description: "The problems to run, by id; all of the set's when left out." },
+      deleteRacers: { type: "boolean", description: "Delete each racer's conversation and worktree once its result is kept, keeping its changes as a patch; false unless the user asks for it." },
     },
   },
   async run(input, context) {

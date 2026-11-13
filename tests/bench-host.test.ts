@@ -6,6 +6,7 @@ import { join } from "node:path";
 import host from "../host.ts";
 import { BENCH_ITEM_TYPE } from "../bench-host.ts";
 import { resultsFileOf, retryPrompt, runSummary, type BenchRun } from "../bench.ts";
+import { DIFF_LIMIT } from "../race.ts";
 import { fakeMirador, finished, git, PROFILES, until } from "./fake-mirador.ts";
 
 let scratch: string;
@@ -577,4 +578,114 @@ test("a run of one problem on one column says so in the singular", async () => {
   const answer = await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
 
   expect(answer).toBe(`Bench run ${mirador.page().id} started: 1 problem × 1 column on Tiny. The run page shows each result as it comes.`);
+});
+
+test("a run with deleteRacers deletes each racer once its result is kept, keeping its changes as the cell's patch", async () => {
+  await makeSet(repo, ["a", "b"]);
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }], atOnce: 1, deleteRacers: true });
+  await until(() => mirador.started.length === 1, "the first racer started");
+  writeFileSync(join(mirador.started[0]!.folder, "answer.txt"), "42\n");
+  writeFileSync(join(mirador.started[0]!.folder, "notes.md"), "how I solved it\n".repeat(4000));
+
+  await mirador.replied(1, finished("done"));
+  await until(() => mirador.started.length === 2, "the next racer started");
+
+  const first = mirador.page().cells[0]!;
+  expect(first).toMatchObject({ state: "done", result: "passed", conversationId: null, folder: null, branch: null });
+  expect(first.patch).toContain("-0\n");
+  expect(first.patch).toContain("+42\n");
+  expect(first.patch!.endsWith(`[Cut at ${DIFF_LIMIT} characters.]`), "a long patch is cut, with nowhere left to look").toBe(true);
+  expect(mirador.deleted).toEqual([mirador.started[0]!.id]);
+  expect(await mirador.act({ kind: "diff", cell: 0 })).toEqual({ diff: first.patch });
+
+  writeFileSync(join(mirador.started[1]!.folder, "answer.txt"), "42\n");
+  await mirador.replied(2, finished("done"));
+
+  const run = mirador.page();
+  expect(run.phase).toBe("done");
+  expect(mirador.deleted).toEqual(mirador.started.map(({ id }) => id));
+  expect(run.cells[1]!.patch).toContain("+42\n");
+  const results = JSON.parse(readFileSync(join(repo, "runs", resultsName(run)), "utf8")) as { cells: { patch: string | null }[] };
+  expect(results.cells.map(({ patch }) => patch)).toEqual(run.cells.map(({ patch }) => patch));
+});
+
+test("a run without deleteRacers deletes none, and its cells' patch stays null", async () => {
+  await makeSet(repo, ["answer"]);
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  await until(() => mirador.started.length === 1, "the racer started");
+  writeFileSync(join(mirador.started[0]!.folder, "answer.txt"), "42\n");
+
+  await mirador.replied(1, finished("done"));
+
+  const run = mirador.page();
+  expect(run.phase).toBe("done");
+  expect(run.deleteRacers).toBe(false);
+  expect(mirador.deleted).toEqual([]);
+  expect(run.cells[0]).toMatchObject({ result: "passed", patch: null, conversationId: mirador.started[0]!.id, folder: mirador.started[0]!.folder, branch: mirador.started[0]!.branch });
+});
+
+test("Stop run with deleteRacers deletes the racers it stopped, keeping their changes", async () => {
+  await makeSet(repo, ["a", "b", "c"]);
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }], atOnce: 2, deleteRacers: true });
+  await until(() => mirador.started.length === 2, "the racers started");
+  writeFileSync(join(cellStart(mirador, 0).folder, "answer.txt"), "42\n");
+  await rm(cellStart(mirador, 1).folder, { recursive: true, force: true });
+
+  expect(await mirador.act({ kind: "stop" })).toEqual({ stopped: true });
+
+  const run = mirador.page();
+  expect(run.phase).toBe("stopped");
+  expect(mirador.deleted.sort()).toEqual(mirador.started.map(({ id }) => id).sort());
+  expect(run.cells[0]!.patch).toContain("+42\n");
+  expect(run.cells[1]!.patch, "a folder already gone leaves no patch").toBeNull();
+  expect(run.cells[2]!.patch, "a racer that never started has none").toBeNull();
+  expect(run.cells.map(({ conversationId, folder, branch }) => [conversationId, folder, branch])).toEqual([
+    [null, null, null],
+    [null, null, null],
+    [null, null, null],
+  ]);
+  const results = JSON.parse(readFileSync(join(repo, "runs", resultsName(run)), "utf8"));
+  expect(results.cells[0].patch, "the results file holds the patch").toContain("+42\n");
+});
+
+test("with deleteRacers, a racer that starts after Stop run is deleted", async () => {
+  await makeSet(repo, ["answer"]);
+  const mirador = miradorOf();
+  const start = holdStarts(mirador, () => true);
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }], deleteRacers: true });
+  await until(() => start.held === 1, "the racer is starting");
+
+  expect(await mirador.act({ kind: "stop" })).toEqual({ stopped: true });
+  start.letThrough();
+  await until(() => mirador.deleted.length === 1, "the racer that started late was deleted");
+
+  const late = mirador.started[0]!;
+  expect(mirador.deleted).toEqual([late.id]);
+  expect(mirador.stopped, "deleted instead of only stopped").toEqual([]);
+  expect(mirador.page().cells[0]).toMatchObject({ state: "done", result: "stopped", conversationId: null, folder: null, branch: null, startedAt: null });
+});
+
+test("the bench tool and the form's start keep deleteRacers", async () => {
+  await makeSet(repo, ["answer"]);
+  const asked = miradorOf({ caller: "agent" });
+  await asked.call(asked.captain, "bench", { columns: [{ profile: "Kimi" }], deleteRacers: true });
+  expect(asked.page()).toMatchObject({ phase: "setup", deleteRacers: true });
+  expect(await asked.act({ kind: "start", columns: [{ profile: "Kimi" }], deleteRacers: true })).toEqual({ started: asked.page().id });
+  expect(asked.page()).toMatchObject({ phase: "running", deleteRacers: true });
+  await until(() => asked.started.length === 1, "the racer started");
+
+  const unasked = miradorOf({ caller: "agent" });
+  await unasked.call(unasked.captain, "bench", { columns: [{ profile: "Kimi" }] });
+  expect(unasked.page()).toMatchObject({ phase: "setup", deleteRacers: false });
+  expect(await unasked.act({ kind: "start", columns: [{ profile: "Kimi" }] })).toEqual({ started: unasked.page().id });
+  expect(unasked.page().deleteRacers).toBe(false);
+  await until(() => unasked.started.length === 1, "the racer started");
+
+  const direct = miradorOf();
+  await direct.call(direct.captain, "bench", { columns: [{ profile: "Kimi" }], deleteRacers: true });
+  expect(direct.page().deleteRacers).toBe(true);
+  await until(() => direct.started.length === 1, "the racer started");
 });

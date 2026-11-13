@@ -49,6 +49,7 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
   const items: (PluginItem<Data> & { conversationId: string })[] = [];
   const prompts: { conversationId: string; text: string; afterTurn: boolean }[] = [];
   const stopped: string[] = [];
+  const deleted: string[] = [];
   const started: { id: string; profile: string; prompt: string; title?: string; folder: string; branch: string; model?: string; effort?: string; from?: string }[] = [];
   /** Conversations started beside the captain, with no worktree, such as a race's judge. */
   const beside: { id: string; profile: string; prompt: string; title?: string }[] = [];
@@ -97,6 +98,9 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
     async stopConversation(id) {
       stopped.push(id);
     },
+    async deleteStarted(id) {
+      deleted.push(id);
+    },
     async promptStarted(id, text) {
       prompts.push({ conversationId: id, text, afterTurn: true });
     },
@@ -113,5 +117,5 @@ export function fakeMirador<Data extends Race | BenchRun = Race>({
   const heard = (number: number, activity: PluginActivity) =>
     host.activity!({ ...activity, conversationId: started[number - 1]!.id, conversationTitle: "", at: Date.now() } as never, { storage, windowChanged() {}, profileSetting: () => null, profiles: () => PROFILES, settingOfProfile: () => null });
   const promptsTo = (conversationId: string) => prompts.filter((prompt) => prompt.conversationId === conversationId);
-  return { captain, contextOf, call, page, racer, replied, judgeReplied, heard, prompts, promptsTo, stopped, started, beside, items, raceItem, act };
+  return { captain, contextOf, call, page, racer, replied, judgeReplied, heard, prompts, promptsTo, stopped, deleted, started, beside, items, raceItem, act };
 }

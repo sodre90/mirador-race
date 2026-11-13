@@ -922,12 +922,20 @@ function benchFormOf(run) {
       attempts: run.attempts,
       atOnce: run.atOnce,
       tries: run.settings.tries === 2,
+      deleteRacers: null,
       problems: run.problems.join(", "),
       validating: false,
       error: "",
     };
   }
   return shownBench.form;
+}
+
+/** Whether the form deletes its racers until the user says otherwise: what the run asked, or a run of more than 20 cells, counting All as the set's problems. */
+function deleteRacersByDefault(run, form, set) {
+  const named = form.problems.split(",").map((id) => id.trim()).filter(Boolean);
+  const problems = named.length > 0 ? named.length : (set.problems?.length ?? 0);
+  return run.deleteRacers || problems * form.columns.length * form.attempts > 20;
 }
 
 /** Each problem's validation, as the host finds them: ✓ valid, or the words in the danger color, with the output folded. */
@@ -1013,6 +1021,7 @@ function benchFormView(run) {
           attempts: form.attempts,
           tries: form.tries ? 2 : 1,
           atOnce: form.atOnce,
+          deleteRacers: form.deleteRacers ?? deleteRacersByDefault(run, form, set),
           ...(problems.length > 0 ? { problems } : {}),
         });
       } catch (error) {
@@ -1057,6 +1066,7 @@ function benchFormView(run) {
       el("label", {}, "Attempts", el("input", { type: "number", "aria-label": "Attempts", min: 1, max: MAX_ATTEMPTS, value: form.attempts, oninput: (event) => (form.attempts = Number(event.target.value)) })),
       el("label", {}, "Racers at once per profile", el("input", { type: "number", "aria-label": "Racers at once per profile", min: 1, max: MAX_AT_ONCE, value: form.atOnce, oninput: (event) => (form.atOnce = Number(event.target.value)) })),
       el("label", { class: "row" }, el("input", { type: "checkbox", checked: form.tries, onchange: (event) => (form.tries = event.target.checked) }), "A second try after a failed check"),
+      el("label", { class: "row" }, el("input", { type: "checkbox", checked: form.deleteRacers ?? deleteRacersByDefault(run, form, set), onchange: (event) => (form.deleteRacers = event.target.checked) }), "Delete each racer's conversation and worktree once its result is kept"),
       el("label", {}, "Problems", el("input", { type: "text", "aria-label": "Problems", placeholder: "All; or ids, separated by commas", value: form.problems, oninput: (event) => (form.problems = event.target.value) })),
       el("div", {}, validate),
       validationTable(run),

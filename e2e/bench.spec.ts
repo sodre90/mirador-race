@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { helpers, startHostWithThisPlugin, type TestHost } from "./mirador.ts";
@@ -63,6 +63,14 @@ async function sendAndWait(page: Page, text: string) {
 }
 
 const benchFrame = (page: Page) => page.locator(".canvas-panel:visible .canvas-body > .canvas-frame.plugin iframe");
+
+const racerBranches = () => git("branch", "--list", "mirador/*", "--format=%(refname:short)").split("\n").filter(Boolean);
+/** The worktrees of the set's repository the racers work in, leaving out the set itself. */
+const racerWorktrees = () =>
+  git("worktree", "list", "--porcelain")
+    .split("\n\n")
+    .map((entry) => entry.match(/^worktree (.+)$/m)?.[1])
+    .filter((folder): folder is string => folder !== undefined && folder !== realpathSync(host.projectDir));
 
 /** A new bench form in the captain's conversation, as /race:bench with nothing after it opens one. */
 async function openBenchForm(page: Page) {
@@ -147,4 +155,51 @@ test("Stop run stops it", async ({ page }) => {
   await expect(matrix.locator('button[data-cell="0"]')).toContainText("stopped");
   await expect(view.locator(".race-head .phase")).toHaveText("Stopped");
   await expect(view.getByRole("button", { name: "Stop run" })).toHaveCount(0);
+});
+
+test("A run that deletes its racers keeps each one's changes", async ({ page }) => {
+  const goFile = join(host.root, "answer-go");
+  addProblem("answer", `WRITE [{"waitFor": ${JSON.stringify(goFile)}}]`, "grep -qx 42 answer.txt");
+  git("add", "problems");
+  git("commit", "-qm", "answer's racer works in its own folder");
+
+  await helpers().signIn(page, host);
+  await page.goto(`${host.origin}/#/c/${captainId}`);
+  const view = await openBenchForm(page);
+  await view.getByLabel("Column 1's profile").selectOption(profileName);
+  await view.getByLabel("Problems").fill("answer");
+  const deleteRacers = view.getByLabel("Delete each racer's conversation and worktree once its result is kept");
+  await expect(deleteRacers, "a run of one cell doesn't tick it on its own").not.toBeChecked();
+  await deleteRacers.check();
+  await helpers().untilFramePainted(page, benchFrame(page));
+  const branchesBefore = racerBranches();
+  const worktreesBefore = racerWorktrees();
+  await view.getByRole("button", { name: "Start run" }).click();
+
+  const heading = view.getByRole("heading", { name: /^Bench run \w+$/ });
+  await expect(heading).toBeVisible();
+  const runId = (await heading.textContent())!.replace("Bench run ", "");
+  const newBranches = () => racerBranches().filter((branch) => !branchesBefore.includes(branch));
+  const newWorktrees = () => racerWorktrees().filter((folder) => !worktreesBefore.includes(folder));
+  await expect.poll(newWorktrees, "the racer's worktree").toHaveLength(1);
+  await expect.poll(newBranches, "the racer's branch").toHaveLength(1);
+  const folder = newWorktrees()[0]!;
+  const branch = newBranches()[0]!;
+
+  const racerRow = page.locator(".sidebar li[data-reorder-id]", { hasText: `Bench ${runId} · answer · racer` });
+  if ((await racerRow.count()) === 0) await page.locator(`.sidebar li[data-reorder-id="${captainId}"] .delegated-toggle`).click();
+  await expect(racerRow, "the racer's conversation shows under the captain").toHaveCount(1);
+
+  writeFileSync(join(folder, "answer.txt"), "42\n");
+  writeFileSync(goFile, "go\n");
+
+  const matrix = view.getByRole("table", { name: "Results" });
+  await expect(matrix.locator('button[data-cell="0"]'), "the racer's answer passed its check").toContainText("✓", { timeout: 60_000 });
+  await expect(racerRow, "the racer's conversation leaves the sidebar").toHaveCount(0);
+  await expect.poll(() => existsSync(folder), "the racer's worktree folder is gone").toBe(false);
+  await expect.poll(() => racerBranches().includes(branch), "the racer's branch is gone from the set's repository").toBe(false);
+
+  await matrix.locator('button[data-cell="0"]').click();
+  await view.locator(".cell-details").getByRole("button", { name: "Changes" }).click();
+  await expect(view.locator(".cell-details").getByLabel("Changes"), "the cell's Changes still shows the change to answer.txt").toContainText("+42");
 });

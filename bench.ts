@@ -50,6 +50,8 @@ export interface BenchCell {
   conversationId: string | null;
   folder: string | null;
   branch: string | null;
+  /** The racer's work since its problem's start, kept as a patch once its conversation and worktree are deleted. */
+  patch: string | null;
   tries: TryResult[];
   startedAt: number | null;
   endedAt: number | null;
@@ -69,6 +71,8 @@ export interface BenchRun {
   attempts: number;
   /** How many racers of one profile work at once; a local model serves only a few. */
   atOnce: number;
+  /** Delete each racer's conversation and worktree once its result is kept, keeping its changes as the cell's patch. */
+  deleteRacers: boolean;
   problems: string[];
   cells: BenchCell[];
   phase: RunPhase;
@@ -128,6 +132,7 @@ const waitingCell = (problem: string, column: number, attempt: number): BenchCel
   conversationId: null,
   folder: null,
   branch: null,
+  patch: null,
   tries: [],
   startedAt: null,
   endedAt: null,
@@ -279,6 +284,7 @@ export function resultsFileOf(run: BenchRun, totals = totalsOf(run)) {
       tries: cell.tries.map(({ check }) => ({ outcome: check.outcome, exitCode: check.exitCode, seconds: check.durationMs / 1000 })),
       usage: cell.usage,
       note: cell.note,
+      patch: cell.patch,
     })),
     totals,
   };
