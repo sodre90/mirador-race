@@ -255,7 +255,8 @@ async function timeLimitReached(storage: CanvasPluginStorage, id: string, index:
   const captain = runCaptains.get(kept.captain);
   const { conversationId } = cell;
   updateRun(storage, id, (run) => markDone(run.cells[index]!, "timed out", `It ran past the set's time limit of ${run.settings.agentTimeLimitMinutes} minutes.`, captain));
-  if (captain && conversationId) await captain.stopConversation(conversationId).catch(() => {});
+  if (kept.run.deleteRacers) await cleanUpRacer(storage, id, index);
+  else if (captain && conversationId) await captain.stopConversation(conversationId).catch(() => {});
   await finishIfDone(storage, id);
   await advance(storage, id);
 }

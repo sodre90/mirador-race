@@ -483,6 +483,18 @@ test("a racer past the set's time limit is stopped, and its cell timed out", asy
   expect(mirador.page().cells[0]!.result, "the stopped reply doesn't change the result").toBe("timed out");
 });
 
+test("with deleteRacers, a racer past the set's time limit is deleted rather than only stopped, keeping its changes", async () => {
+  await makeSet(repo, ["answer"], { agentTimeLimitMinutes: 0.001 });
+  const mirador = miradorOf();
+  await mirador.call(mirador.captain, "bench", { columns: [{ profile: "Kimi" }], deleteRacers: true });
+  await until(() => mirador.page().cells[0]!.result === "timed out", "the cell timed out");
+  await until(() => mirador.deleted.length === 1, "the racer was deleted");
+
+  expect(mirador.deleted).toEqual([mirador.started[0]!.id]);
+  expect(mirador.stopped).toEqual([]);
+  expect(mirador.page().cells[0]).toMatchObject({ state: "done", result: "timed out", conversationId: null, folder: null, branch: null, patch: "" });
+});
+
 test("a finished cell records its conversation's tokens and cost", async () => {
   await makeSet(repo, ["answer"]);
   const mirador = miradorOf();

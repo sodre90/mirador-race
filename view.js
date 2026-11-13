@@ -1006,6 +1006,7 @@ function benchFormView(run) {
       }
     },
   });
+  const deleteRacersBox = el("input", { type: "checkbox", checked: form.deleteRacers ?? deleteRacersByDefault(run, form, set), onchange: (event) => (form.deleteRacers = event.target.checked) });
   const start = el("button", {
     class: "primary",
     text: "Start run",
@@ -1021,7 +1022,7 @@ function benchFormView(run) {
           attempts: form.attempts,
           tries: form.tries ? 2 : 1,
           atOnce: form.atOnce,
-          deleteRacers: form.deleteRacers ?? deleteRacersByDefault(run, form, set),
+          deleteRacers: deleteRacersBox.checked,
           ...(problems.length > 0 ? { problems } : {}),
         });
       } catch (error) {
@@ -1066,7 +1067,7 @@ function benchFormView(run) {
       el("label", {}, "Attempts", el("input", { type: "number", "aria-label": "Attempts", min: 1, max: MAX_ATTEMPTS, value: form.attempts, oninput: (event) => (form.attempts = Number(event.target.value)) })),
       el("label", {}, "Racers at once per profile", el("input", { type: "number", "aria-label": "Racers at once per profile", min: 1, max: MAX_AT_ONCE, value: form.atOnce, oninput: (event) => (form.atOnce = Number(event.target.value)) })),
       el("label", { class: "row" }, el("input", { type: "checkbox", checked: form.tries, onchange: (event) => (form.tries = event.target.checked) }), "A second try after a failed check"),
-      el("label", { class: "row" }, el("input", { type: "checkbox", checked: form.deleteRacers ?? deleteRacersByDefault(run, form, set), onchange: (event) => (form.deleteRacers = event.target.checked) }), "Delete each racer's conversation and worktree once its result is kept"),
+      el("label", { class: "row" }, deleteRacersBox, "Delete each racer's conversation and worktree once its result is kept"),
       el("label", {}, "Problems", el("input", { type: "text", "aria-label": "Problems", placeholder: "All; or ids, separated by commas", value: form.problems, oninput: (event) => (form.problems = event.target.value) })),
       el("div", {}, validate),
       validationTable(run),
