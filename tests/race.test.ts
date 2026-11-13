@@ -478,6 +478,21 @@ test("a captain's turn that ended before the pick doesn't count as taking the wo
   await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow("Delete the racers once the captain has taken their work.");
 });
 
+test("a pick asked again, after a captain turn ended since the first ask, waits for the captain anew", async () => {
+  const mirador = fakeMirador();
+  await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });
+  for (const number of [1, 2]) await mirador.replied(number, finished("done"));
+
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.captainHeard({ kind: "turn-ended", ended: "finished" });
+  expect(typeof mirador.page().workTakenAt, "the turn ended after the first ask, whose message never went").toBe("number");
+  await mirador.act({ kind: "pick", pick: { kind: "take", racer: 1 } });
+  await mirador.act({ kind: "picked", pick: { kind: "take", racer: 1 } });
+
+  expect(mirador.page().workTakenAt).toBeNull();
+  await expect(mirador.act({ kind: "deleteRacers" })).rejects.toThrow("Delete the racers once the captain has taken their work.");
+});
+
 test("a race stored without the new fields, as Race 0.4.0 left it, shows no racer deleted and refuses deleteRacers in deciding", async () => {
   const mirador = fakeMirador();
   await mirador.call(mirador.captain, "race", { task: "Make answer 42", profile: "Qwen Flash", racers: 2 });

@@ -453,7 +453,10 @@ function racePicking(id: string, storage: CanvasPluginStorage) {
 /** The message that hands the user's pick to the captain, which the page sends as their own. */
 function pick(id: string, chosen: RacePick, storage: CanvasPluginStorage) {
   const message = pickMessage(racePicking(id, storage), chosen);
-  update(storage, id, (race) => (race.pickAskedAt = Date.now()));
+  update(storage, id, (race) => {
+    race.pickAskedAt = Date.now();
+    race.workTakenAt = null;
+  });
   return { message };
 }
 
