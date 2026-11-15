@@ -826,6 +826,7 @@ const host: CanvasHost<Race | BenchRun> = {
       },
     },
     race_board: {
+      onDemand: true,
       description:
         "For a race's racers, and the conversation that started it: read the notes the other racers posted since you last read, and where each racer is, and post a note of your own: your plan, what you learned, what failed.",
       input: {
@@ -851,6 +852,7 @@ const host: CanvasHost<Race | BenchRun> = {
       },
     },
     race_peek: {
+      onDemand: true,
       description: "For a race's racers, the conversation that started it, and its judge: a racer's work so far, as a diff from where the race started, committed or not, new files included.",
       input: {
         type: "object",
@@ -865,6 +867,7 @@ const host: CanvasHost<Race | BenchRun> = {
       },
     },
     race_vote: {
+      onDemand: true,
       description: "For a race's racers, when asked to vote: rank the other racers' work, best first, and say why.",
       input: {
         type: "object",
@@ -889,6 +892,7 @@ const host: CanvasHost<Race | BenchRun> = {
       },
     },
     race_judge: {
+      onDemand: true,
       description: "For a race's judge: score each finished racer's work against the task, from 0 to 10, with why, and sum up what set the best apart.",
       input: {
         type: "object",
@@ -974,7 +978,7 @@ const host: CanvasHost<Race | BenchRun> = {
   },
   guidance: {
     instructions:
-      "- race: when the user asks to race a task, draft the race: its form opens on the canvas, filled in with the task, the profiles (one for every racer, e.g. four of a small model, or one each to compare models; leave out any the user didn't name), the check and the vote, and the user starts it there. The racers work in git worktrees of their own, sharing a board; when they finish you hear their results, and the user picks the work to take or hands the pick to you. Advise how to check their work: hidden check files when tests can tell right from wrong, a judge when it takes judgement, or both, with why; the user chooses on the form.",
+      "- race: when the user asks to race a task on several agents, draft the race: its form opens on the canvas with the task, the profiles the user named, the check and the vote, and the user starts it there. You hear the results when the racers finish. Advise how to check the work: hidden check files when tests can tell right from wrong, a judge when it takes judgement.",
     often: "- race: when the user asks to race a task on several agents; you draft it, the user starts it.",
   },
 };

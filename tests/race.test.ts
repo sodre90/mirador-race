@@ -28,6 +28,13 @@ beforeEach(async () => {
 });
 afterEach(() => rm(scratch, { recursive: true, force: true }));
 
+test("only race is sent with every request: the benchmark and the racers' and judge's tools load when an agent looks for them", () => {
+  const sentWithEveryRequest = Object.entries(host.tools)
+    .filter(([, tool]) => !tool.onDemand)
+    .map(([name]) => name);
+  expect(sentWithEveryRequest).toEqual(["race"]);
+});
+
 test("a race starts its racers on one profile, each in a worktree of its own with its number, and shows them on a page", async () => {
   const mirador = fakeMirador();
 
@@ -338,7 +345,7 @@ test("the race tool's guidance and description tell the agent to advise how to c
   expect(description).toContain("checkFiles");
   expect(description).toContain("judge");
   expect(description).toContain("advice");
-  expect(host.guidance!.instructions).toContain("Advise how to check their work");
+  expect(host.guidance!.instructions).toContain("Advise how to check the work");
 });
 
 test("the user's /race:race without a task or a profile gets a form, filled in with what they said", async () => {

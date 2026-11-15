@@ -612,6 +612,7 @@ export const benchItem: PluginItemType<BenchRun> = {
 const DRAFTED = "Bench run drafted on the canvas: the user checks it and presses Start run. You hear the results as your next message once it's over.";
 
 export const benchTool: CanvasTool = {
+  onDemand: true,
   description:
     "Run a benchmark: every problem of the workspace's problem set, on each column (a profile, with a model and effort if given), each racer alone in a worktree from its problem's start. Race checks each racer's work with the problem's hidden check and gives a failed racer a second try with what the check printed, unless the set allows one try. Returns at once; you hear the results when the run is over.",
   command: { description: "Run a benchmark of this workspace's problem set; with no arguments, a form to fill in" },
