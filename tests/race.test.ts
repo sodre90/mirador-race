@@ -33,6 +33,11 @@ test("no tool of Race is sent with every request: each loads when an agent looks
   expect(host.guidance!.instructions).toContain("- race: when the user asks to race a task");
 });
 
+test("Race loads on request, with a line that says what it does and when to reach for it", () => {
+  expect(host.guidance?.summary).toStartWith("several agents race one task");
+  expect(host.guidance?.summary).toContain("when the user asks to race a task or to benchmark profiles");
+});
+
 test("a race starts its racers on one profile, each in a worktree of its own with its number, and shows them on a page", async () => {
   const mirador = fakeMirador();
 

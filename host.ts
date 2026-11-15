@@ -981,6 +981,7 @@ const host: CanvasHost<Race | BenchRun> = {
     instructions:
       "- race: when the user asks to race a task on several agents, draft the race: its form opens on the canvas with the task, the profiles the user named, the check and the vote, and the user starts it there. You hear the results when the racers finish. Advise how to check the work: hidden check files when tests can tell right from wrong, a judge when it takes judgement.",
     often: "- race: when the user asks to race a task on several agents; you draft it, the user starts it.",
+    summary: "several agents race one task, each in a worktree of its own, or a benchmark runs profiles over a problem set; when the user asks to race a task or to benchmark profiles.",
   },
 };
 

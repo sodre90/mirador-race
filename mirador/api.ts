@@ -440,7 +440,17 @@ export interface CanvasHost<Data = unknown> {
    * A line each, e.g. "- checklist: …", for the canvas server's instructions and for what Claude Code and pi are told
    * when Settings ask for the canvas often.
    */
-  guidance?: { instructions?: string; often?: string };
+  guidance?: {
+    instructions?: string;
+    often?: string;
+    /**
+     * What the plugin does and when to reach for it, in one short line without the plugin's name. A Mirador that knows it
+     * loads the plugin on request for Claude Code: a conversation is told that line alone, and gets `instructions` and the
+     * plugin's tools once its agent calls plugin_load. It needs no newer `api`: a Mirador that doesn't know it tells
+     * `instructions` and gives the tools as before.
+     */
+    summary?: string;
+  };
   /** The user's action in an item's view, sent with `mirador.send`; resolves to what send resolves to in the view. */
   action?(item: PluginItem<Data>, action: unknown, context: CanvasActionContext<Data>): unknown;
   /** What the agent should hear of with the user's next message, such as what the user did in an item. */
