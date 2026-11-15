@@ -764,6 +764,7 @@ const host: CanvasHost<Race | BenchRun> = {
   tools: {
     bench: benchTool,
     race: {
+      onDemand: true,
       description: raceDescription,
       command: { description: "Race a task on several agents; with no arguments, a form to fill in" },
       input: {

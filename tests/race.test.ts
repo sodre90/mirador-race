@@ -28,11 +28,9 @@ beforeEach(async () => {
 });
 afterEach(() => rm(scratch, { recursive: true, force: true }));
 
-test("only race is sent with every request: the benchmark and the racers' and judge's tools load when an agent looks for them", () => {
-  const sentWithEveryRequest = Object.entries(host.tools)
-    .filter(([, tool]) => !tool.onDemand)
-    .map(([name]) => name);
-  expect(sentWithEveryRequest).toEqual(["race"]);
+test("no tool of Race is sent with every request: each loads when an agent looks for it, and the guidance says when to race", () => {
+  expect(Object.values(host.tools).every((tool) => tool.onDemand)).toBe(true);
+  expect(host.guidance!.instructions).toContain("- race: when the user asks to race a task");
 });
 
 test("a race starts its racers on one profile, each in a worktree of its own with its number, and shows them on a page", async () => {
